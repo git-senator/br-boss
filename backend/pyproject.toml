@@ -1,0 +1,20 @@
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+asyncio_mode = "auto"
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+# as migrações são geradas pelo alembic — o estilo delas não é o nosso
+extend-exclude = ["alembic/versions"]
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+
+[tool.ruff.lint.per-file-ignores]
+# Depends(...) como valor padrão é justamente o jeito de declarar uma
+# dependência no FastAPI, e não uma chamada de função esquecida.
+"app/api/*.py" = ["B008"]
+"app/security.py" = ["B008"]

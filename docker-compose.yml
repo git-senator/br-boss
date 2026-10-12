@@ -1,0 +1,116 @@
+# O projeto é totalmente isolado do resto do servidor: rede própria,
+# volumes próprios, prefixo de nomes próprio (name: brboss).
+# Para fora fica só a porta do sistema, e mesmo assim em 127.0.0.1 —
+# quem publica na internet é um reverse proxy externo, como um site à parte.
+name: brboss
+
+services:
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: boss
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-boss}
+      POSTGRES_DB: boss
+    volumes:
+      - db_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U boss"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    volumes:
+      - redis_data:/data
+
+  translator:
+    # Tradução dos e-mails sem IA generativa: LibreTranslate (Argos
+    # Translate) neste mesmo servidor. Grátis, sem limites, e os e-mails
+    # não saem daqui. Não fica exposto — só dentro da rede brboss.
+    # Os modelos de idioma são baixados na primeira subida (~100–200 MB
+    # por idioma) e ficam no volume próprio.
+    image: libretranslate/libretranslate:v1.9.6
+    restart: unless-stopped
+    environment:
+      LT_LOAD_ONLY: ${TRANSLATOR_LANGUAGES:-en,pt,es,fr,de,it,ru,zh,ja,ko,ar}
+      LT_THREADS: "4"
+    volumes:
+      - translator_models:/home/libretranslate/.local
+
+  minio:
+    # A imagem minio/minio saiu do Docker Hub — o MinIO não publica mais
+    # imagens da versão gratuita. A Chainguard compila o mesmo MinIO do
+    # código-fonte.
+    image: chainguard/minio
+    restart: unless-stopped
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${S3_USER:-boss}
+      MINIO_ROOT_PASSWORD: ${S3_PASSWORD:-boss12345}
+    volumes:
+      - minio_data:/data
+
+  api:
+    build: ./backend
+    restart: unless-stopped
+    env_file: .env
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+    # O modelo local (Ollama) roda fora do contêiner, na máquina ao lado.
+    # Esta linha dá ao contêiner o caminho até ele. Sem Ollama, não atrapalha.
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+    ports:
+      # API_PORT — quando a 8080 já está ocupada no servidor (por exemplo,
+      # por outro projeto): a API escuta em outra porta, só em 127.0.0.1.
+      - "127.0.0.1:${API_PORT:-8080}:8000"
+
+  worker:
+    build: ./backend
+    restart: unless-stopped
+    command: python -m app.worker.run
+    env_file: .env
+    environment:
+      TZ: ${TZ:-America/Sao_Paulo}
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  web:
+    build: ./frontend
+    restart: unless-stopped
+    environment:
+      # Endereço interno: o navegador não fala direto com a API, todos os
+      # pedidos saem do servidor Next — o token de login não chega ao
+      # código do navegador.
+      API_URL: http://api:8000
+      TZ: ${TZ:-America/Sao_Paulo}
+      # No servidor com https, obrigatoriamente true — senão o token de
+      # login aceitaria viajar por um canal aberto.
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+    depends_on:
+      - api
+    ports:
+      # Por padrão o site escuta só na própria máquina. Para ver pelo
+      # celular na mesma Wi-Fi, use WEB_BIND=0.0.0.0 no .env. No servidor
+      # não mexa nisso: para fora o site sai só por https, nunca pela
+      # porta crua.
+      #
+      # WEB_PORT — quando a porta 80 do servidor já é do nginx (com outros
+      # sites): o site escuta, por exemplo, em 127.0.0.1:3300, e o nginx
+      # o publica pelo domínio com https.
+      - "${WEB_BIND:-127.0.0.1}:${WEB_PORT:-80}:3000"
+
+volumes:
+  db_data:
+  redis_data:
+  minio_data:
+  translator_models:

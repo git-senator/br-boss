@@ -1,0 +1,406 @@
+@import "tailwindcss";
+
+/* Vidro sobre preto: painéis semitransparentes com desfoque, texto branco
+   em diferentes intensidades, cor só onde ela significa alguma coisa. Os tokens
+   ficam aqui numa lista só — senão os tons se espalham pelos arquivos. */
+@theme {
+  --color-ground: #000000; /* fundo da página */
+  --color-panel: rgb(24 24 30 / 0.6); /* cabeçalho — vidro */
+  --color-row: rgb(255 255 255 / 0.07); /* vidro fosco: cards, blocos */
+  --color-row-lit: rgb(255 255 255 / 0.11); /* vidro sob o cursor */
+  --color-edge: rgb(255 255 255 / 0.12); /* borda do vidro */
+  --color-edge-lit: rgb(255 255 255 / 0.22); /* borda sob o cursor */
+  --color-ink: rgb(255 255 255 / 0.92); /* texto principal */
+  --color-ink-dim: rgb(255 255 255 / 0.55); /* texto secundário */
+  --color-ink-faint: rgb(255 255 255 / 0.38); /* horário, informações auxiliares */
+  --color-titan: #ffffff; /* selecionado */
+  /* O único azul — links, botão principal, remetente. */
+  --color-link: #0a84ff;
+
+  /* Importância: vermelho, laranja, amarelo. Sobre o preto eles se leem bem
+     mesmo numa cápsula com preenchimento transparente, sem ofuscar. */
+  --color-alarm: #ff3b30;
+  --color-warn: #ff9500;
+  --color-watch: #ffcc00;
+  --color-calm: rgb(255 255 255 / 0.1);
+  --color-ok: #34c759;
+
+  /* Arco-íris da IA — para botões e molduras onde o modelo atua. */
+  --color-ai-blue: #007aff;
+  --color-ai-indigo: #5856d6;
+  --color-ai-purple: #af52de;
+  --color-ai-pink: #ff2d55;
+  --color-ai-orange: #ff9500;
+
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, "SF Pro Display", "SF Pro Text", "Segoe UI Variable",
+    "Segoe UI", "Helvetica Neue", Arial, sans-serif;
+  --font-mono: "SF Mono", Menlo, Monaco, Consolas, monospace;
+}
+
+:root {
+  color-scheme: dark;
+}
+
+body {
+  background: var(--color-ground);
+  color: var(--color-ink);
+  -webkit-text-size-adjust: 100%;
+}
+
+/* O fundo fica numa camada fixa separada, abaixo de todo o resto.
+   Não usamos background-attachment: fixed no próprio body: nos celulares ele
+   dá trancos ao rolar e às vezes nem funciona.
+
+   Embaixo a textura, por cima um véu leve — e nada mais: os brilhos coloridos
+   do layout viravam manchas sujas através do vidro fosco. A textura é necessária
+   para o vidro: sobre preto liso o desfoque não aparece e o vidro parece só
+   uma placa cinza. Sobre a textura dá para ver que o card é vidro fosco. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: -2;
+  background-image:
+    linear-gradient(rgb(0 0 0 / 0.2), rgb(0 0 0 / 0.35)),
+    url("/fon.jpg");
+  background-size: cover;
+  background-position: center;
+  background-repeat: no-repeat;
+}
+
+
+/* backdrop-filter é escrito uma vez só, sem -webkit-: o bundler adiciona
+   sozinho a variante para o Safari. Se escrevermos os dois, o minificador mantém
+   só o prefixado — que o Chrome não entende, e o vidro deixa de desfocar.
+
+   Vidro fosco. As quatro partes que compõem o vidro:
+   preenchimento semitransparente denso com um gradiente leve (a luz vem
+   de cima), desfoque forte do que está atrás, um reflexo claro na borda
+   superior e uma sombra suave que destaca o vidro do fundo. */
+.glass {
+  background: linear-gradient(180deg, rgb(40 40 48 / 0.62), rgb(22 22 28 / 0.66));
+  backdrop-filter: blur(28px) saturate(170%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.1),
+    0 10px 40px rgb(0 0 0 / 0.45);
+}
+
+.glass-card {
+  --tint: linear-gradient(135deg, rgb(255 255 255 / 0.11), rgb(255 255 255 / 0.04));
+  background: var(--tint);
+  backdrop-filter: blur(22px) saturate(160%);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.16),
+    inset 0 -1px 0 rgb(255 255 255 / 0.03),
+    0 8px 30px rgb(0 0 0 / 0.4);
+}
+
+.glass-card {
+  border: 1px solid rgb(255 255 255 / 0.13);
+  transition:
+    background 300ms cubic-bezier(0.16, 1, 0.3, 1),
+    border-color 300ms cubic-bezier(0.16, 1, 0.3, 1),
+    transform 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.glass-card:hover {
+  --tint: linear-gradient(135deg, rgb(255 255 255 / 0.16), rgb(255 255 255 / 0.07));
+  border-color: rgb(255 255 255 / 0.22);
+}
+
+/* Abas, chips das caixas de e-mail, seletor de seções — vidro mais fino. */
+.glass-pill {
+  --tint: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.05));
+  background: var(--tint);
+  backdrop-filter: blur(16px) saturate(160%);
+  border: 1px solid rgb(255 255 255 / 0.12);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.12);
+  transition: all 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+a.glass-pill:hover {
+  --tint: linear-gradient(180deg, rgb(255 255 255 / 0.15), rgb(255 255 255 / 0.08));
+}
+
+.glass-pill-on {
+  --tint: linear-gradient(180deg, rgb(255 255 255 / 0.28), rgb(255 255 255 / 0.16));
+  border-color: rgb(255 255 255 / 0.3);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.3),
+    0 4px 14px rgb(0 0 0 / 0.35);
+}
+
+/* Botões redondos sobre o vidro: setas das faixas, o X do painel. */
+.glass-button {
+  /* Quase opaco — o desfoque embaixo não aparece, e a camada seria desperdício. */
+  background: rgb(40 40 48 / 0.9);
+  border: 1px solid rgb(255 255 255 / 0.18);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.15),
+    0 4px 14px rgb(0 0 0 / 0.5);
+}
+
+.glass-button:hover {
+  background: rgb(60 60 70 / 0.85);
+}
+
+/* Moldura arco-íris em volta do que a IA escreveu: dá para ver onde está a opinião
+   do modelo e onde está o próprio e-mail. Dentro — o mesmo vidro fosco, só que mais escuro. */
+.ai-frame {
+  position: relative;
+  --tint: linear-gradient(135deg, rgb(30 30 40 / 0.78), rgb(18 18 24 / 0.82));
+  background: var(--tint);
+  backdrop-filter: blur(22px) saturate(160%);
+  border-radius: 1.25rem;
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.1);
+}
+
+.ai-frame::before {
+  content: "";
+  position: absolute;
+  inset: -1px;
+  border-radius: 1.3rem;
+  padding: 1px;
+  background: linear-gradient(135deg, #007aff, #5856d6, #af52de, #ff2d55, #ff9500);
+  -webkit-mask:
+    linear-gradient(#fff 0 0) content-box,
+    linear-gradient(#fff 0 0);
+  -webkit-mask-composite: xor;
+  mask-composite: exclude;
+  pointer-events: none;
+  opacity: 0.85;
+}
+
+/* Painel do e-mail à direita — vidro escuro e espesso. */
+.glass-sheet {
+  background: linear-gradient(180deg, rgb(28 28 36 / 0.82), rgb(16 16 22 / 0.88));
+  backdrop-filter: blur(40px) saturate(170%);
+  border: 1px solid rgb(255 255 255 / 0.14);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.12),
+    0 30px 80px rgb(0 0 0 / 0.6);
+}
+
+/* Vidro sem desfoque ao vivo — no computador com mouse.
+
+   O desfoque ao vivo (backdrop-filter) em uma centena de cards seguidos o Chrome
+   desenha em pedaços: ao passar o mouse, fica uma faixa clara no card,
+   um pedaço mal desenhado da camada vizinha. Nosso fundo é imóvel, então
+   o «que está atrás do vidro» desfocado pode ser pego pronto: a mesma imagem,
+   desfocada de antemão (fon-frost.jpg), fixada na tela exatamente
+   como o fundo da página. Através de cada bloco aparece exatamente o seu pedaço
+   da textura, desfocado — e nada precisa ser recalculado ao passar o mouse ou rolar.
+
+   Nos celulares o fundo fixo não funciona (o iOS o ignora), e
+   lá não existe hover — então fica o desfoque ao vivo. */
+@media (hover: hover) and (pointer: fine) {
+  :root {
+    --frost:
+      linear-gradient(rgb(0 0 0 / 0.2), rgb(0 0 0 / 0.35)) fixed,
+      url("/fon-frost.jpg") center / cover no-repeat fixed;
+  }
+
+  /* Dentro do cabeçalho e da janela do e-mail, atrás do bloco já não há textura, e sim o próprio vidro:
+     ali fica só o tom. */
+  .glass,
+  .glass-sheet {
+    --frost: linear-gradient(transparent, transparent);
+  }
+
+  .glass-card,
+  .glass-pill,
+  .ai-frame {
+    background: var(--tint), var(--frost);
+    backdrop-filter: none;
+  }
+}
+
+.ai-button {
+  background-image: linear-gradient(90deg, #007aff, #af52de, #ff2d55);
+}
+
+/* Menu suspenso — denso, quase opaco. O desfoque não ajuda
+   aqui: o menu fica dentro de outro vidro, e esse vidro desfoca
+   só o elemento pai, então o texto sob o menu aparecia através dos itens. */
+.menu {
+  background: rgb(30 30 38 / 0.97);
+  border: 1px solid rgb(255 255 255 / 0.14);
+  box-shadow:
+    inset 0 1px 0 rgb(255 255 255 / 0.1),
+    0 16px 40px rgb(0 0 0 / 0.6);
+}
+
+/* Peças comuns de formulário — as mesmas em todas as páginas, para que o botão «Analisar»
+   nas regras e o «Conectar» nas caixas de e-mail não fiquem com visuais diferentes. */
+.field {
+  width: 100%;
+  border-radius: 0.75rem;
+  border: 1px solid rgb(255 255 255 / 0.12);
+  background: rgb(255 255 255 / 0.06);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.08);
+  padding: 0.625rem 0.875rem;
+  font-size: 0.875rem;
+  color: #fff;
+  outline: none;
+  transition: all 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.field::placeholder {
+  color: rgb(255 255 255 / 0.4);
+}
+
+.field:focus {
+  border-color: rgb(10 132 255 / 0.6);
+  background: rgb(255 255 255 / 0.09);
+  box-shadow: 0 0 0 3px rgb(10 132 255 / 0.25);
+}
+
+select.field option {
+  background: #1c1c22;
+}
+
+.btn-main,
+.btn-quiet,
+.btn-danger {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 0.375rem;
+  border-radius: 0.75rem;
+  font-size: 0.8125rem;
+  font-weight: 500;
+  transition: all 300ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+.btn-main {
+  background: #0a84ff;
+  color: #fff;
+  padding: 0.5rem 1rem;
+  box-shadow: 0 4px 14px rgb(10 132 255 / 0.3);
+}
+
+.btn-main:hover {
+  background: #0071e3;
+}
+
+.btn-quiet {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.1), rgb(255 255 255 / 0.05));
+  border: 1px solid rgb(255 255 255 / 0.12);
+  box-shadow: inset 0 1px 0 rgb(255 255 255 / 0.1);
+  color: rgb(255 255 255 / 0.85);
+  padding: 0.375rem 0.875rem;
+}
+
+.btn-quiet:hover {
+  background: linear-gradient(180deg, rgb(255 255 255 / 0.16), rgb(255 255 255 / 0.08));
+  color: #fff;
+}
+
+.btn-danger {
+  background: #ff3b30;
+  color: #fff;
+  padding: 0.375rem 0.875rem;
+}
+
+.btn-main:active,
+.btn-quiet:active,
+.btn-danger:active {
+  transform: translateY(1px);
+}
+
+/* Mensagens nas páginas: «salvo» e «não deu certo». */
+.note-ok,
+.note-bad {
+  border-radius: 0.75rem;
+  padding: 0.5rem 0.875rem;
+  font-size: 0.8125rem;
+  color: rgb(255 255 255 / 0.92);
+}
+
+.note-ok {
+  border: 1px solid rgb(52 199 89 / 0.35);
+  background: rgb(52 199 89 / 0.1);
+}
+
+.note-bad {
+  border: 1px solid rgb(255 59 48 / 0.4);
+  background: rgb(255 59 48 / 0.1);
+}
+
+.spring {
+  transition: all 400ms cubic-bezier(0.16, 1, 0.3, 1);
+}
+
+/* A janela do e-mail desce de cima e o fundo escurecido aparece. Sem JavaScript:
+   a janela já vem aberta do servidor, a animação é CSS puro. */
+@keyframes sheet-in {
+  from {
+    transform: translateY(-100vh);
+  }
+  to {
+    transform: translateY(0);
+  }
+}
+
+@keyframes fade-in {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}
+
+.sheet {
+  animation: sheet-in 500ms cubic-bezier(0.16, 1, 0.3, 1) both;
+}
+
+.veil {
+  animation: fade-in 300ms ease-out both;
+}
+
+/* Barras de rolagem finas, como no sistema. */
+* {
+  scrollbar-width: thin;
+  scrollbar-color: rgb(255 255 255 / 0.15) transparent;
+}
+
+/* Algarismos de largura fixa: sem isso, o contador da aba faz o rótulo pular
+   toda vez que 9 vira 10. */
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* Em tela estreita, a faixa de abas rola com o dedo e se encaixa no lugar. */
+.rail {
+  scrollbar-width: none;
+}
+
+.rail::-webkit-scrollbar {
+  display: none;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
+/* Texto direto sobre a textura — títulos, legendas, datas — ganha um fundo escuro
+   feito de sombra: a textura é clara, e sem isso o texto cinza se perde nela. Dentro
+   do vidro o fundo já é uniforme, ali a sombra não é necessária. */
+main {
+  text-shadow:
+    0 1px 2px rgb(0 0 0 / 0.95),
+    0 0 10px rgb(0 0 0 / 0.75);
+}
+
+:is(.glass, .glass-card, .glass-pill, .glass-sheet, .glass-button, .ai-frame, .menu, .field, button, kbd) {
+  text-shadow: none;
+}

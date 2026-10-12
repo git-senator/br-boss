@@ -1,0 +1,26 @@
+# segredos — nunca no repositório
+.env
+*.pem
+*.key
+backups/
+
+# python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.ruff_cache/
+.venv/
+
+# node
+node_modules/
+.next/
+
+# sistema operacional
+Thumbs.db
+.DS_Store
+
+# relatório da última execução dos testes
+backend/.pytest-last.log
+
+# relatório da última execução dos testes da interface
+frontend/.nt.log
