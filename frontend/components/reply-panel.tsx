@@ -1,6 +1,7 @@
 import { RefreshCw, Send, Sparkles } from "lucide-react";
 
 import { draftAction, reopenAction, sendReplyAction } from "@/app/actions";
+import { PendingButton } from "@/components/pending-button";
 import type { MessageFull, ReplyRow } from "@/lib/api";
 import { untilLabel, whenLabel } from "@/lib/format";
 
@@ -154,20 +155,36 @@ export function ReplyPanel({
             <span className="mr-auto text-[11px] text-ink-faint">
               Para: {open?.to ?? message.answer_to} · da conta {message.account.email}
             </span>
-            <button
+            <PendingButton
               formAction={draftAction}
               formNoValidate
               name="regenerate"
               value={open ? "1" : "0"}
               className={QUIET}
+              pending={
+                <>
+                  <Sparkles className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                  A IA está escrevendo…
+                </>
+              }
             >
               {open ? <RefreshCw className="h-3.5 w-3.5" aria-hidden /> : <Sparkles className="h-3.5 w-3.5" aria-hidden />}
               {open ? "Outro rascunho" : "Gerar"}
-            </button>
-            <button type="submit" className={MAIN}>
+            </PendingButton>
+            <PendingButton
+              name="send"
+              value="1"
+              className={MAIN}
+              pending={
+                <>
+                  <Send className="h-3.5 w-3.5 animate-pulse" aria-hidden />
+                  Enviando…
+                </>
+              }
+            >
               <Send className="h-3.5 w-3.5" aria-hidden />
               {open?.status === "failed" ? "Enviar novamente" : "Enviar"}
-            </button>
+            </PendingButton>
           </div>
         </form>
       )}

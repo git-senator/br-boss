@@ -16,9 +16,13 @@ import time
 
 from app.brief import morning
 from app.db import SessionFactory
-from app.worker.tasks import classification_paused, classify_pending, sync_all
+from app.worker.tasks import classification_paused, classify_pending, sync_all, sync_new
 
 INTERVAL_SECONDS = 60
+
+# Com que frequência verificar se uma caixa nova foi conectada. A consulta
+# ao banco é leve, e quem acabou de conectar a caixa quer ver os e-mails já.
+NEW_BOX_SECONDS = 3
 
 logging.basicConfig(
     level=logging.INFO,
@@ -27,8 +31,23 @@ logging.basicConfig(
 log = logging.getLogger("worker")
 
 
+async def watch_new_boxes() -> None:
+    """Caixas novas — na hora, em paralelo com a rodada geral."""
+    while True:
+        try:
+            results = await sync_new(SessionFactory)
+            if results:
+                fetched = sum(count for count in results.values() if count > 0)
+                log.info("caixas novas sincronizadas: %s, e-mails: %s", len(results), fetched)
+        except Exception:
+            log.exception("a sincronização das caixas novas falhou")
+        await asyncio.sleep(NEW_BOX_SECONDS)
+
+
 async def main() -> None:
     log.info("worker iniciado, consulta a cada %s segundos", INTERVAL_SECONDS)
+    # A referência mantém a tarefa viva: sem ela o coletor de lixo pode descartá-la.
+    _watcher = asyncio.create_task(watch_new_boxes())
     while True:
         started = time.monotonic()
         try:

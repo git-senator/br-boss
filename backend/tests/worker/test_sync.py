@@ -9,7 +9,7 @@ from app.ai.triage import TriageResult
 from app.mail.base import RawMessage
 from app.mail.errors import MailAuthError
 from app.models import Account, Message, Rule
-from app.worker.tasks import classify_pending, sync_account, sync_all
+from app.worker.tasks import classify_pending, sync_account, sync_all, sync_new
 
 
 def raw(msg_id: str, subject: str = "Boleto") -> RawMessage:
@@ -431,3 +431,31 @@ async def test_first_visit_stores_everything_before_sorting(session, account, ma
     assert ai["calls"] == tasks.INLINE_CLASSIFY
     assert sum(1 for m in stored if m.category) == tasks.INLINE_CLASSIFY
     assert account.last_synced_at is not None
+
+
+async def test_new_mailbox_is_taken_right_away(session, session_factory, user, mail, ai):
+    """A caixa nova é buscada na hora; a já sincronizada não é tocada aqui."""
+    from app.crypto import encrypt_secret
+
+    fresh = Account(user_id=user.id, email="fresh@uol.com.br", secret_ciphertext=encrypt_secret("p"))
+    known = Account(
+        user_id=user.id, email="known@uol.com.br", secret_ciphertext=encrypt_secret("p"),
+        last_synced_at=datetime.now(UTC),
+    )
+    session.add_all([fresh, known])
+    await session.commit()
+    mail(fresh.email, FakeSource([raw("m1")]))
+    mail(known.email, FakeSource([raw("m2")]))
+
+    assert await sync_new(session_factory) == {fresh.id: 1}
+    assert await sync_new(session_factory) == {}
+
+
+async def test_mailbox_in_progress_is_not_taken_twice(
+    session, session_factory, account, mail, ai, monkeypatch
+):
+    """Caixa que já está sendo sincronizada a rodada geral não pega de novo."""
+    mail(account.email, FakeSource([raw("m1")]))
+    monkeypatch.setattr("app.worker.tasks._busy", {account.id})
+
+    assert await sync_all(session_factory) == {}

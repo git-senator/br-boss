@@ -92,10 +92,18 @@ function AiBox({ message, back, done }: { message: MessageFull; back: string; do
           ) : (
             <form action={draftAction}>
               <Hidden id={message.id} back={back} done={done} />
-              <button className="spring inline-flex items-center gap-1.5 rounded-xl bg-link px-3.5 py-1.5 text-xs font-medium text-white shadow-md hover:bg-link/80">
+              <PendingButton
+                className="spring inline-flex items-center gap-1.5 rounded-xl bg-link px-3.5 py-1.5 text-xs font-medium text-white shadow-md hover:bg-link/80"
+                pending={
+                  <>
+                    <Sparkles className="h-3.5 w-3.5 animate-spin" aria-hidden />
+                    A IA está escrevendo…
+                  </>
+                }
+              >
                 <Sparkles className="h-3.5 w-3.5" aria-hidden />
                 Preparar resposta
-              </button>
+              </PendingButton>
             </form>
           )}
 

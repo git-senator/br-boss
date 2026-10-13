@@ -205,6 +205,12 @@ async def _classify(message: Message, rules: list[Rule]) -> None:
     message.action_required = result.action_required
 
 
+# Caixas sendo sincronizadas agora. Uma caixa recém-conectada é
+# sincronizada na hora, sem esperar a rodada geral — e a rodada não pode
+# pegá-la uma segunda vez em paralelo.
+_busy: set[int] = set()
+
+
 async def sync_account(session: AsyncSession, account: Account) -> int:
     """Baixar os e-mails novos de uma caixa. Devolve quantos foram adicionados."""
     source = get_source(account)
@@ -262,17 +268,49 @@ async def sync_all(session_factory: async_sessionmaker[AsyncSession]) -> dict[in
             await session.scalars(select(Account.id).where(Account.is_active.is_(True)))
         )
 
+    return await _sync_ids(session_factory, account_ids)
+
+
+async def sync_new(session_factory: async_sessionmaker[AsyncSession]) -> dict[int, int]:
+    """Caixas que nunca foram sincronizadas — as recém-conectadas.
+
+    A rodada geral, com a triagem dos e-mails, leva minutos, e a caixa nova
+    esperava até cinco minutos por ela. Daqui ela é buscada segundos depois
+    de conectada. Caixa com erro não fica girando aqui — a rodada geral repete.
+    """
+    async with session_factory() as session:
+        account_ids = list(
+            await session.scalars(
+                select(Account.id).where(
+                    Account.is_active.is_(True),
+                    Account.last_synced_at.is_(None),
+                    Account.last_error.is_(None),
+                )
+            )
+        )
+    return await _sync_ids(session_factory, account_ids)
+
+
+async def _sync_ids(
+    session_factory: async_sessionmaker[AsyncSession], account_ids: list[int]
+) -> dict[int, int]:
     results: dict[int, int] = {}
     limit = asyncio.Semaphore(CONCURRENCY)
 
     async def one(account_id: int) -> None:
-        async with limit, session_factory() as session:
-            account = await session.get(Account, account_id)
-            try:
-                results[account_id] = await sync_account(session, account)
-            except Exception:
-                log.exception("a caixa %s não sincronizou", account.email)
-                results[account_id] = -1
+        if account_id in _busy:
+            return
+        _busy.add(account_id)
+        try:
+            async with limit, session_factory() as session:
+                account = await session.get(Account, account_id)
+                try:
+                    results[account_id] = await sync_account(session, account)
+                except Exception:
+                    log.exception("a caixa %s não sincronizou", account.email)
+                    results[account_id] = -1
+        finally:
+            _busy.discard(account_id)
 
     await asyncio.gather(*(one(account_id) for account_id in account_ids))
     return results
