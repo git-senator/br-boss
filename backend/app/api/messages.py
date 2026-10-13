@@ -9,7 +9,7 @@ from sqlalchemy import func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
-from app import translator
+from app import quota, translator
 from app.ai import keys
 from app.ai.provider import AIError, AINotConfigured
 from app.ai.schemas import ADS, CATEGORIES, SPAM, UNSORTED
@@ -19,7 +19,7 @@ from app.config import settings
 from app.db import get_session
 from app.mail.providers import profile_for
 from app.models import Account, Message, Reply, User
-from app.security import current_user, visible_accounts
+from app.security import MEMBER, current_user, visible_accounts
 
 router = APIRouter(prefix="/api/messages", tags=["messages"])
 
@@ -353,6 +353,24 @@ async def get_message(
     }
 
 
+async def _deepl_allowed(session: AsyncSession, user: User, message: Message) -> bool:
+    """Este e-mail ainda cabe no teto diário do DeepL da pessoa?
+
+    A cota do DeepL é uma só para o servidor inteiro. A equipe não tem teto;
+    quem se cadastrou sozinho tem DEEPL_MEMBER_DAILY_CHARS por dia. Passou
+    disso — traduz o tradutor próprio, e a pessoa nem percebe a troca.
+    """
+    if not settings.deepl_api_key or user.role != MEMBER:
+        return True
+    return await quota.take(
+        session,
+        f"deepl:chars:{user.id}:",
+        quota.today(),
+        translator.deepl_chars(message),
+        settings.deepl_member_daily_chars,
+    )
+
+
 @router.post("/{message_id}/translate")
 async def translate_message(
     message_id: int,
@@ -370,8 +388,11 @@ async def translate_message(
                 with keys.using(keys.key_of(user)):
                     done = await translate(message)
             else:
-                # Tradutor próprio no servidor: sem rede neural e sem limites.
-                done = await translator.translate(message)
+                # DeepL primeiro (se houver chave e couber no teto da pessoa),
+                # depois o tradutor próprio no servidor, sem limites.
+                done = await translator.translate(
+                    message, use_deepl=await _deepl_allowed(session, user, message)
+                )
         except translator.TranslatorError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
         except AINotConfigured as exc:
@@ -380,9 +401,13 @@ async def translate_message(
             raise HTTPException(
                 status_code=502, detail="A IA não respondeu agora. Tente de novo em um minuto."
             ) from exc
-        message.subject_translated = done.subject
-        message.body_translated = done.body
-        await session.commit()
+        # Dois cliques seguidos viram dois pedidos ao mesmo tempo. Se o outro
+        # já salvou a tradução enquanto este esperava o tradutor, fica a dele.
+        await session.refresh(message, ["subject_translated", "body_translated"])
+        if message.body_translated is None:
+            message.subject_translated = done.subject
+            message.body_translated = done.body
+            await session.commit()
     return {"subject_translated": message.subject_translated, "body_translated": message.body_translated}
 
 

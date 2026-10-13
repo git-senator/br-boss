@@ -214,15 +214,20 @@ export async function deleteAccount(id: number): Promise<void> {
   await request(`/api/accounts/${id}`, { method: "DELETE" });
 }
 
-/** O login é a única requisição sem token, por isso não passa por request(). */
+/**
+ * O login é a única requisição sem token, por isso não passa por request().
+ * clientIp — como no cadastro: a API conta os erros por endereço, e não só
+ * pelo e-mail, para que um desconhecido não tranque o dono fora da conta.
+ */
 export async function login(
   email: string,
   password: string,
   code: string,
+  clientIp: string,
 ): Promise<{ access_token: string }> {
   const response = await fetch(`${API_URL}/api/auth/login`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: { "Content-Type": "application/json", "X-Client-IP": clientIp },
     body: JSON.stringify({ email, password, code: code || null }),
     cache: "no-store",
   });
@@ -264,6 +269,33 @@ export async function register(
 
 export async function me(): Promise<Me> {
   return request("/api/auth/me");
+}
+
+/**
+ * Encerrar a sessão no servidor: o token deixa de valer, e não só some do
+ * cookie. Fora de request() de propósito — com o token já vencido, request()
+ * levaria à página de login antes de o cookie ser apagado. Falhou — tanto
+ * faz: o cookie é apagado de qualquer jeito.
+ */
+export async function logout(): Promise<void> {
+  const token = await getToken();
+  if (!token) return;
+  await fetch(`${API_URL}/api/auth/logout`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  }).catch(() => null);
+}
+
+/** Trocar a senha. Devolve um token novo: as outras sessões caem, esta continua. */
+export async function changePassword(
+  currentPassword: string,
+  newPassword: string,
+): Promise<{ access_token: string }> {
+  return request("/api/auth/password", {
+    method: "POST",
+    body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
+  });
 }
 
 /**

@@ -10,7 +10,9 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: boss
-      POSTGRES_PASSWORD: ${DB_PASSWORD:-boss}
+      # Sem senha padrão: com «boss» de reserva, um .env esquecido subiria o
+      # banco com a senha que está escrita aqui, à vista de todos.
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?defina DB_PASSWORD no .env}
       POSTGRES_DB: boss
     volumes:
       - db_data:/var/lib/postgresql/data
@@ -49,7 +51,8 @@ services:
     command: server /data --console-address ":9001"
     environment:
       MINIO_ROOT_USER: ${S3_USER:-boss}
-      MINIO_ROOT_PASSWORD: ${S3_PASSWORD:-boss12345}
+      # Como no banco: sem senha de reserva, o .env tem que trazê-la.
+      MINIO_ROOT_PASSWORD: ${S3_PASSWORD:?defina S3_PASSWORD no .env}
     volumes:
       - minio_data:/data
 

@@ -23,6 +23,7 @@ from email.utils import getaddresses, parsedate_to_datetime
 from html import unescape
 
 from app.crypto import decrypt_secret
+from app.mail import guard
 from app.mail.base import MailSource, RawAttachment, RawMessage
 from app.mail.errors import (
     BAD_PASSWORD,
@@ -35,14 +36,21 @@ from app.mail.errors import (
 from app.mail.providers import profile_for
 from app.models import Account
 
-_TAG = re.compile(r"<[^>]+>")
+# Sem «<» dentro da tag: senão um texto com mil «<» soltos faria cada um
+# deles varrer o e-mail inteiro atrás de um «>» — tempo quadrático.
+_TAG = re.compile(r"<[^<>]+>")
 _WHITESPACE = re.compile(r"[ \t\r\f\v\xa0]+")
 
 # A formatação do e-mail é removida inteira, junto com o conteúdo: sem isso
 # sobram só as tags, e as próprias regras de estilo vão parar no texto.
 # Pego em e-mail real: uma mensagem da Meta começava com duas telas de CSS.
 _COMMENT = re.compile(r"<!--.*?-->", re.S)
-_STYLED = re.compile(r"<(style|script)\b[^>]*>.*?</\1>", re.I | re.S)
+_STYLE = re.compile(r"<style\b[^<>]*>.*?</style>", re.I | re.S)
+_SCRIPT = re.compile(r"<script\b[^<>]*>.*?</script>", re.I | re.S)
+# Os fechamentos, para _sub_closed achar o último deles.
+_COMMENT_END = re.compile(r"-->")
+_STYLE_END = re.compile(r"</style>", re.I)
+_SCRIPT_END = re.compile(r"</script>", re.I)
 
 # E estes são os mesmos estilos, mas já vazados para o texto: aparece tanto
 # «<style>» sem a tag de fechamento quanto estilo direto na parte de texto.
@@ -50,15 +58,20 @@ _STYLED = re.compile(r"<(style|script)\b[^>]*>.*?</\1>", re.I | re.S)
 # «propriedade: valor;» e nada mais. Texto comum não tem essa cara,
 # e um JSON no e-mail não é afetado — lá há vírgulas e aspas, não
 # ponto e vírgula.
-_DECLARATION = r"[-a-zA-Z_*]+\s*:[^;{}]*"
-_CSS_BLOCK = re.compile(
-    r"([^{}<>]{0,300})\{\s*(?:" + _DECLARATION + r";\s*)*" + _DECLARATION + r";?\s*\}",
-    re.S,
-)
-_EMPTY_BLOCK = re.compile(r"([^{}<>]{0,300})\{\s*\}", re.S)
+#
+# Tudo possessivo (*+, ++): o remetente controla o texto, e uma expressão
+# que volta atrás à vontade leva minutos num e-mail montado para isso —
+# pego na auditoria: um «{a:» seguido de cem mil espaços. Assim cada
+# chave é examinada uma vez só, até a próxima chave.
+_DECLARATION = r"[-a-zA-Z_*]++\s*+:[^;{}]*+"
+_CSS_BLOCK = re.compile(r"\{\s*+(?:" + _DECLARATION + r"(?:;\s*+|(?=\})))++\}")
+_EMPTY_BLOCK = re.compile(r"\{\s*+\}")
+# O seletor antes do bloco: até tantos caracteres para trás, sem cruzar outra chave ou tag.
+_SELECTOR_REACH = 300
 _SELECTOR_TOKEN = re.compile(r"^(?:[.#:@\[*(][^\s]*|[>+~)]|[a-z][a-z0-9_-]{0,30})[,){]?$")
 _SELECTOR_MARK = re.compile(r"[.#:@\[*>+~]")
 _CSS_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+_CSS_COMMENT_END = re.compile(r"\*/")
 _DECLARATION_LINE = re.compile(r"^[-a-zA-Z_*]+\s*:[^{}]*;+$")
 _PUNCTUATION_ONLY = re.compile(r"^[{};\s]+$")
 
@@ -108,6 +121,17 @@ _UNKNOWN_CHARSETS = {"unknown-8bit", "x-unknown", "unknown"}
 # para a triagem numa só leva. Com o teto, o histórico é processado em
 # lotes, rodada após rodada.
 BATCH_LIMIT = 200
+# E-mails acima disto não são baixados — só o cabeçalho, com um aviso no
+# lugar do texto. Duzentos e-mails de 50 MB numa rodada estouram a memória
+# do worker; e o que importa num e-mail desses está no anexo, que o
+# sistema não mostra mesmo.
+MAX_MESSAGE_BYTES = 15 * 1024 * 1024
+TOO_BIG_NOTE = (
+    "[Este e-mail é grande demais para ser baixado aqui. Abra-o no próprio "
+    "serviço de e-mail para ver o conteúdo e os anexos.]"
+)
+# Quanto texto do e-mail passa pela limpeza (_tidy).
+TEXT_LIMIT = 200_000
 # Como os serviços de e-mail chamam a pasta de spam. O jeito certo é perguntar
 # ao servidor pela marca \Junk; a lista serve quando o servidor não manda a marca.
 # Nomes com acento vêm em UTF-7 modificado do IMAP («&APQ-» = «ô»).
@@ -236,21 +260,53 @@ def _part_text(part: EmailMessage) -> str:
         return payload.decode("utf-8", errors="replace")
 
 
+def _cut_blocks(pattern: "re.Pattern[str]", text: str) -> str:
+    """Tirar os blocos de estilo, cada um junto com o seletor que vem antes.
+
+    O seletor é procurado à mão, para trás a partir da chave, e não dentro
+    da expressão: na expressão, cada posição do texto tentaria trezentos
+    caracteres adiante, e um e-mail grande sem chaves já custaria caro.
+    """
+    out: list[str] = []
+    last = 0
+    for match in pattern.finditer(text):
+        start = match.start()
+        floor = max(last, start - _SELECTOR_REACH)
+        begin = start
+        while begin > floor and text[begin - 1] not in "{}<>":
+            begin -= 1
+        out.append(text[last:begin])
+        out.append(_drop_selector(text[begin:start]) + chr(10))
+        last = match.end()
+    out.append(text[last:])
+    return "".join(out)
+
+
 def _drop_styles(text: str) -> str:
     """Jogar fora as regras de estilo que foram parar no texto.
 
     O aninhamento (@media em volta de regras comuns) é resolvido com
     repetições: primeiro some o interno, depois o invólucro que ficou vazio.
     """
-    def cut(match: "re.Match[str]") -> str:
-        return _drop_selector(match.group(1)) + chr(10)
-
     for _ in range(5):
-        cleaned = _EMPTY_BLOCK.sub(cut, _CSS_BLOCK.sub(cut, text))
+        cleaned = _cut_blocks(_EMPTY_BLOCK, _cut_blocks(_CSS_BLOCK, text))
         if cleaned == text:
             return text
         text = cleaned
     return text
+
+
+def _sub_closed(pattern: "re.Pattern[str]", close: "re.Pattern[str]", text: str) -> str:
+    """Trocar por espaço os trechos «abre … fecha» — só até o último «fecha».
+
+    Depois do último fechamento nenhuma abertura acha o seu par, e cada uma
+    varreria o resto do e-mail à toa: mil «<!--» soltos seriam um milhão de
+    passos. Até ali, cada abertura acha o par e o trecho some de uma vez.
+    """
+    end = 0
+    for found in close.finditer(text):
+        end = found.end()
+    return pattern.sub(" ", text[:end]) + text[end:] if end else text
 
 
 def _tidy(text: str) -> str:
@@ -268,7 +324,8 @@ def _tidy(text: str) -> str:
     tidied: list[str] = []
     # unescape aqui, e não só ao processar a parte HTML: «&#064;» no lugar
     # da arroba aparece também na parte de texto — ela sai do mesmo template.
-    for raw_line in _drop_styles(_CSS_COMMENT.sub(" ", unescape(text))).splitlines():
+    text = _sub_closed(_CSS_COMMENT, _CSS_COMMENT_END, unescape(text))
+    for raw_line in _drop_styles(text).splitlines():
         line = _WHITESPACE.sub(" ", raw_line).strip()
         # Ponto e vírgula no começo da linha é resto de uma regra cortada.
         # Texto de verdade não começa assim.
@@ -286,8 +343,9 @@ def _tidy(text: str) -> str:
 
 
 def _html_to_text(html: str) -> str:
-    text = _COMMENT.sub(" ", html)
-    text = _STYLED.sub(" ", text)
+    text = _sub_closed(_COMMENT, _COMMENT_END, html)
+    text = _sub_closed(_STYLE, _STYLE_END, text)
+    text = _sub_closed(_SCRIPT, _SCRIPT_END, text)
     return _tidy(_TAG.sub(" ", text))
 
 
@@ -308,13 +366,12 @@ def parse_email(raw: bytes, uid: str) -> RawMessage:
         if part.get_content_maintype() == "multipart":
             continue
         if _is_attachment(part):
-            payload = part.get_payload(decode=True) or b""
             attachments.append(
                 RawAttachment(
                     filename=_decode_header(part.get_filename()) or "sem-nome",
                     content_type=part.get_content_type(),
-                    size_bytes=len(payload),
-                    fetch=_make_fetch(payload),
+                    size_bytes=_encoded_size(part),
+                    fetch=_make_fetch(part),
                 )
             )
         elif part.get_content_type() == "text/plain":
@@ -322,9 +379,13 @@ def parse_email(raw: bytes, uid: str) -> RawMessage:
         elif part.get_content_type() == "text/html":
             html_parts.append(_part_text(part))
 
-    body = _tidy("\n".join(plain_parts))
+    # O teto vem antes da limpeza: ela passa várias vezes pelo texto, e um
+    # e-mail de dezenas de megabytes de texto travaria o worker. Para a
+    # triagem e a leitura o começo basta — o banco guarda ainda menos
+    # (normalize.BODY_LIMIT).
+    body = _tidy("\n".join(plain_parts)[:TEXT_LIMIT])
     if not body and html_parts:
-        body = _html_to_text("\n".join(html_parts))
+        body = _html_to_text("\n".join(html_parts)[:TEXT_LIMIT])
 
     sender_name, sender = _first_address(parsed.get("From"))
     recipients = [address for _, address in getaddresses(parsed.get_all("To") or []) if address]
@@ -344,9 +405,24 @@ def parse_email(raw: bytes, uid: str) -> RawMessage:
     )
 
 
-def _make_fetch(payload: bytes):
+def _encoded_size(part: EmailMessage) -> int:
+    """Tamanho do anexo sem decodificá-lo.
+
+    Decodificar só para contar bytes é duplicar na memória cada anexo de
+    cada e-mail da rodada. Em base64, cada quatro letras são três bytes.
+    """
+    raw = part.get_payload(decode=False)
+    if not isinstance(raw, str):
+        return 0
+    if (part.get("Content-Transfer-Encoding") or "").strip().lower() == "base64":
+        return len("".join(raw.split())) * 3 // 4
+    return len(raw)
+
+
+def _make_fetch(part: EmailMessage):
+    # Decodificado só quando alguém de fato pede o anexo.
     async def fetch() -> bytes:
-        return payload
+        return part.get_payload(decode=True) or b""
 
     return fetch
 
@@ -404,6 +480,8 @@ class ImapSource(MailSource):
         )
 
     def _login(self) -> imaplib.IMAP4_SSL:
+        # O servidor sai do domínio que a pessoa digitou: nada de endereço interno.
+        guard.ensure_public_host(self.host, self.port)
         try:
             client = imaplib.IMAP4_SSL(self.host, self.port, timeout=30, ssl_context=_TLS)
         except OSError as exc:
@@ -484,28 +562,61 @@ class ImapSource(MailSource):
         _, data = client.uid("search", None, f"UID {start}:*")
         uids = [uid for uid in (data[0] or b"").split() if int(uid) >= start]
         uids = uids[:BATCH_LIMIT]
+        sizes = _sizes(client, uids)
 
         messages = []
         for uid in uids:
+            number = uid.decode()
+            too_big = sizes.get(number, 0) > MAX_MESSAGE_BYTES
             # BODY.PEEK[], e não RFC822. A diferença é uma só: o RFC822 marca
             # o e-mail como lido direto no servidor. Ou seja, nós buscávamos
             # o e-mail — e ele virava lido em silêncio no próprio Gmail, para
             # quem usa pelo celular. O PEEK lê sem mexer na marca: quem decide
             # se o e-mail foi lido é a pessoa, não o sistema.
-            _, payload = client.uid("fetch", uid.decode(), "(BODY.PEEK[])")
+            wanted = "(BODY.PEEK[HEADER])" if too_big else "(BODY.PEEK[])"
+            _, payload = client.uid("fetch", number, wanted)
             if payload and isinstance(payload[0], tuple):
                 # O número do e-mail é único dentro da pasta, mas não entre pastas.
                 # Sem o prefixo, um e-mail do spam colidiria com um da
                 # «Caixa de entrada» de mesmo número.
-                number = uid.decode()
                 letter = parse_email(
                     payload[0][1],
                     uid=number if folder == "inbox" else f"{folder}:{number}",
                 )
+                if too_big:
+                    letter.body_text = TOO_BIG_NOTE
                 letter.folder = folder
                 messages.append(letter)
 
         return messages, uids[-1].decode() if uids else mark
+
+
+_SIZE_UID = re.compile(rb"UID (\d+)")
+_SIZE_VALUE = re.compile(rb"RFC822\.SIZE (\d+)")
+
+
+def _sizes(client: imaplib.IMAP4_SSL, uids: list[bytes]) -> dict[str, int]:
+    """Tamanho de cada e-mail do lote, num pedido só, antes de baixar algum.
+
+    RFC822.SIZE só lê o tamanho — não marca nada como lido. Se o servidor
+    não respondeu direito, seguimos sem tamanhos: melhor baixar como antes
+    do que parar a caixa.
+    """
+    if not uids:
+        return {}
+    try:
+        _, rows = client.uid("fetch", b",".join(uids).decode(), "(RFC822.SIZE)")
+    except imaplib.IMAP4.error:
+        return {}
+    sizes: dict[str, int] = {}
+    for row in rows or []:
+        line = row[0] if isinstance(row, tuple) else row
+        if not isinstance(line, bytes):
+            continue
+        uid, size = _SIZE_UID.search(line), _SIZE_VALUE.search(line)
+        if uid and size:
+            sizes[uid.group(1).decode()] = int(size.group(1))
+    return sizes
 
 
 def _quoted(mailbox: str) -> str:

@@ -10,6 +10,7 @@ TOTP — o mesmo do Google Authenticator.
 """
 
 import hashlib
+import time
 from datetime import UTC, datetime, timedelta
 
 import jwt
@@ -74,10 +75,36 @@ def totp_uri(secret: str, email: str) -> str:
     return pyotp.TOTP(secret).provisioning_uri(name=email, issuer_name="BR BOSS")
 
 
-def verify_totp(secret: str, code: str) -> bool:
-    # valid_window=1 — aceitamos também o código anterior: o relógio do
-    # celular quase sempre está um pouco fora do relógio do servidor.
-    return pyotp.TOTP(secret).verify(code, valid_window=1)
+def totp_step(secret: str, code: str) -> int | None:
+    """Em qual passo de tempo (janela de 30 s) este código vale. None — em nenhum.
+
+    Aceitamos também o passo anterior e o seguinte: o relógio do celular
+    quase sempre está um pouco fora do relógio do servidor. O passo volta
+    para quem chama guardá-lo — um código já usado não pode entrar de novo.
+    """
+    totp = pyotp.TOTP(secret)
+    now = int(time.time())
+    for offset in (0, -1, 1):
+        moment = now + offset * totp.interval
+        if totp.verify(code, for_time=moment):
+            return moment // totp.interval
+    return None
+
+
+def take_totp(user: User, secret: str, code: str | None) -> bool:
+    """Conferir o código e gastá-lo: o mesmo código não serve duas vezes.
+
+    Quem espiou o código por cima do ombro, ou o pegou no meio do caminho,
+    tem até um minuto e meio em que ele ainda vale. Guardando o último passo
+    aceito, só o primeiro uso passa. Quem chama grava a mudança (commit).
+    """
+    step = totp_step(secret, code) if code else None
+    if step is None:
+        return False
+    if user.totp_last_step is not None and step <= user.totp_last_step:
+        return False
+    user.totp_last_step = step
+    return True
 
 
 def password_mark(password_hash: str) -> str:
@@ -96,6 +123,9 @@ def create_token(user: User) -> str:
         {
             "sub": str(user.id),
             "pwd": password_mark(user.password_hash),
+            # Versão das sessões: «Sair» e a troca de senha a aumentam, e
+            # todo token emitido antes deixa de valer na hora.
+            "ver": user.token_version or 0,
             "iat": now,
             "exp": now + TOKEN_TTL,
         },
@@ -135,6 +165,10 @@ async def current_user(
         raise _unauthorized()
     if payload.get("pwd") != password_mark(user.password_hash):
         # a senha foi trocada depois que este login foi emitido
+        raise _unauthorized()
+    # Tokens de antes desta versão não têm "ver" — contam como 0 e seguem
+    # valendo até o primeiro «Sair»: ninguém é expulso pela atualização.
+    if payload.get("ver", 0) != (user.token_version or 0):
         raise _unauthorized()
     return user
 

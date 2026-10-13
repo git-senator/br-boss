@@ -117,3 +117,61 @@ async def test_separators_can_be_tabs_colons_or_commas(auth_client, mail, sessio
 
 async def test_bulk_requires_auth(client):
     assert (await client.post("/api/accounts/bulk", json={"text": "a@b.ru p"})).status_code == 401
+
+
+# --- limites da lista ---
+
+
+async def test_too_many_lines_are_refused_plainly(auth_client, mail):
+    text = "\n".join(f"caixa{n}@gmail.com senha" for n in range(51))
+
+    response = await auth_client.post("/api/accounts/bulk", json={"text": text})
+
+    assert response.status_code == 400
+    assert "50" in response.json()["detail"]
+
+
+async def test_huge_list_is_refused_plainly(auth_client, mail):
+    response = await auth_client.post("/api/accounts/bulk", json={"text": "x" * 20_001})
+
+    assert response.status_code == 400
+    assert "grande demais" in response.json()["detail"]
+
+
+async def test_list_shares_the_hourly_checks_with_the_form(auth_client, mail, session, monkeypatch):
+    """O teto de testes por hora vale para o formulário e a lista somados:
+    senão bastaria trocar de tela para dar a volta nele."""
+    from app.api import accounts as accounts_api
+
+    monkeypatch.setattr(accounts_api, "CHECKS_PER_HOUR", 3)
+    await auth_client.post("/api/accounts", json={"email": "form@gmail.com", "password": "p"})
+
+    body = (
+        await auth_client.post(
+            "/api/accounts/bulk",
+            json={"text": "a@gmail.com s1\nb@gmail.com s2\nc@gmail.com s3"},
+        )
+    ).json()
+
+    assert body["added"] == 2
+    assert [item["email"] for item in body["failed"]] == ["c@gmail.com"]
+    assert "Tentativas de conexão demais" in body["failed"][0]["message"]
+
+
+async def test_mailbox_of_a_stranger_is_not_reported_as_taken(client, mail, session, account):
+    from app.models import User
+    from app.security import create_token
+
+    person = User(email="ana@example.com", password_hash="x", role="member")
+    session.add(person)
+    await session.flush()
+
+    body = (
+        await client.post(
+            "/api/accounts/bulk",
+            json={"text": f"{account.email} senha"},
+            headers={"Authorization": f"Bearer {create_token(person)}"},
+        )
+    ).json()
+
+    assert body == {"added": 1, "failed": []}

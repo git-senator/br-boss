@@ -2,6 +2,7 @@ from datetime import date, datetime
 from decimal import Decimal
 
 from sqlalchemy import (
+    BigInteger,
     Date,
     DateTime,
     ForeignKey,
@@ -37,6 +38,12 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(320), unique=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     totp_secret: Mapped[str | None] = mapped_column(String(64), default=None)
+    # Último passo de tempo (janela de 30 s) em que um código foi aceito.
+    # Um código já usado não entra de novo, nem dentro da própria janela.
+    totp_last_step: Mapped[int | None] = mapped_column(BigInteger, default=None)
+    # Versão das sessões, vai dentro do token. «Sair» e a troca de senha a
+    # aumentam — e todos os tokens emitidos antes param de valer.
+    token_version: Mapped[int] = mapped_column(default=0, server_default="0")
     role: Mapped[str] = mapped_column(String(16), default="owner")
     # Chave pessoal do Gemini, criptografada com a mesma chave das senhas
     # das caixas. Se existe, o e-mail desta pessoa é analisado por conta

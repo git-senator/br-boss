@@ -1,4 +1,4 @@
-import { Bell, KeyRound, LogOut } from "lucide-react";
+import { Bell, KeyRound, Lock, LogOut } from "lucide-react";
 import Link from "next/link";
 
 import { logoutAction } from "@/app/actions";
@@ -138,6 +138,13 @@ export async function Nav({ active, query }: { active?: Section; query?: string 
                 <span className="ml-auto text-xs text-ink-faint">
                   {who?.ai_key_hint ?? (who?.ai_shared_key ? "do servidor" : "nenhuma")}
                 </span>
+              </Link>
+              <Link
+                href="/key#senha"
+                className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-ink transition-colors hover:bg-white/10"
+              >
+                <Lock className="h-4 w-4 text-ink-dim" aria-hidden />
+                Alterar senha
               </Link>
               <form action={logoutAction}>
                 <button className="flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm text-ink transition-colors hover:bg-white/10">

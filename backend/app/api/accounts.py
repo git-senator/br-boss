@@ -11,16 +11,17 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Response, status
 from pydantic import BaseModel
-from sqlalchemy import delete, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app import quota
 from app.crypto import encrypt_secret
 from app.db import get_session
 from app.mail.errors import MailError
 from app.mail.providers import known_services, profile_for
 from app.mail.registry import get_source
 from app.models import Account, Attachment, Message, Reply, User
-from app.security import current_user, visible_accounts
+from app.security import MEMBER, current_user, visible_accounts
 
 router = APIRouter(prefix="/api/accounts", tags=["accounts"])
 
@@ -31,7 +32,30 @@ class NewAccount(BaseModel):
     display_name: str = ""
 
 
+# Limites contra quem usaria o formulário como serviço gratuito de testar
+# senhas em servidores alheios: cada caixa conferida é um login IMAP de
+# verdade, saindo do nosso endereço.
+#
+# Linhas e tamanho de um envio da lista. São umas trinta caixas, com folga.
+BULK_LINES = 50
+BULK_CHARS = 20_000
+# Testes de conexão por pessoa por hora — somando o formulário e a lista.
+# Fica no banco (app.quota), e não na memória: sobrevive a um reinício.
+CHECKS_PER_HOUR = 30
+# Caixas por pessoa que se cadastrou sozinha. A equipe não tem teto.
+MEMBER_MAILBOXES = 50
+
+TOO_MANY_LINES = f"São no máximo {BULK_LINES} caixas por vez. Divida a lista em partes."
+TOO_LONG = "A lista está grande demais. Divida em partes."
+TOO_MANY_CHECKS = (
+    "Tentativas de conexão demais na última hora. Espere um pouco e tente de novo."
+)
+TOO_MANY_MAILBOXES = f"Você já tem o máximo de {MEMBER_MAILBOXES} caixas de e-mail conectadas."
+
+
 class BulkAccounts(BaseModel):
+    # O tamanho é conferido na rota, e não aqui: o erro do pydantic sai em
+    # inglês, e a página o mostraria como «algo deu errado».
     text: str
 
 
@@ -109,9 +133,17 @@ async def add_account(
     user: User = Depends(current_user),
 ) -> dict:
     email = data.email.strip().lower()
-    taken = await session.scalar(select(Account.id).where(Account.email == email))
+    # Só entre as caixas que esta pessoa enxerga. Procurar em todas contaria
+    # a um desconhecido que alguém já conectou este endereço aqui.
+    taken = await session.scalar(
+        select(Account.id).where(Account.email == email, visible_accounts(user))
+    )
     if taken:
         raise HTTPException(status_code=409, detail="Esta caixa de e-mail já está conectada")
+    if await _room_left(session, user) < 1:
+        raise HTTPException(status_code=400, detail=TOO_MANY_MAILBOXES)
+    if not await _take_check(session, user):
+        raise HTTPException(status_code=429, detail=TOO_MANY_CHECKS)
 
     account = Account(
         user_id=user.id,
@@ -131,6 +163,23 @@ async def add_account(
     session.add(account)
     await session.commit()
     return _as_dict(account)
+
+
+async def _room_left(session: AsyncSession, user: User) -> int:
+    """Quantas caixas ainda cabem. Para a equipe, sem teto."""
+    if user.role != MEMBER:
+        return BULK_LINES
+    own = await session.scalar(
+        select(func.count()).select_from(Account).where(Account.user_id == user.id)
+    )
+    return max(0, MEMBER_MAILBOXES - (own or 0))
+
+
+async def _take_check(session: AsyncSession, user: User) -> bool:
+    """Gastar um teste de conexão da hora. False — acabaram."""
+    return await quota.take(
+        session, f"mailcheck:{user.id}:", quota.this_hour(), 1, CHECKS_PER_HOUR
+    )
 
 
 # Linha da lista: endereço, depois senha. O separador pode ser qualquer coisa
@@ -169,11 +218,16 @@ async def add_many(
     uma noite de trabalho. Uma senha errada não cancela as outras: cada
     linha segue seu caminho, e a resposta mostra quem não conectou e por quê.
     """
+    if len(data.text) > BULK_CHARS:
+        raise HTTPException(status_code=400, detail=TOO_LONG)
     lines = [line for line in data.text.splitlines() if line.strip()]
+    if len(lines) > BULK_LINES:
+        raise HTTPException(status_code=400, detail=TOO_MANY_LINES)
     failed: list[dict] = []
     candidates: list[Account] = []
 
-    known = set(await session.scalars(select(Account.email)))
+    # Repetidas só entre as caixas que esta pessoa enxerga — como no formulário.
+    known = set(await session.scalars(select(Account.email).where(visible_accounts(user))))
     seen: set[str] = set()
 
     for line in lines:
@@ -196,6 +250,19 @@ async def add_many(
                 secret_ciphertext=encrypt_secret(password),
             )
         )
+
+    # O que não cabe no teto de caixas ou nos testes da hora volta na lista
+    # de falhas, com o motivo — as outras linhas seguem normalmente.
+    room = await _room_left(session, user)
+    allowed: list[Account] = []
+    for account in candidates:
+        if len(allowed) >= room:
+            failed.append({"email": account.email, "message": TOO_MANY_MAILBOXES})
+        elif not await _take_check(session, user):
+            failed.append({"email": account.email, "message": TOO_MANY_CHECKS})
+        else:
+            allowed.append(account)
+    candidates = allowed
 
     # Testamos as conexões em paralelo, mas no máximo cinco por vez:
     # os serviços de e-mail não gostam de levar trinta conexões de uma vez.

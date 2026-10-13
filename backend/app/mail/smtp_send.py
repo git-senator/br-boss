@@ -17,6 +17,7 @@ from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 
 from app.crypto import decrypt_secret
+from app.mail import guard
 from app.mail.errors import MailAuthError, MailError, MailHostError
 from app.mail.imap_source import find_folder
 from app.mail.providers import profile_for
@@ -63,24 +64,48 @@ def reply_subject(subject: str) -> str:
     return f"Re: {clean}" if clean else "Re:"
 
 
+def _one_line(value: str | None) -> str:
+    """O valor do cabeçalho numa linha só.
+
+    O assunto e o Message-ID vêm do e-mail recebido — quem escreve é o
+    remetente. Uma quebra de linha ali faria o e-mail montado carregar um
+    cabeçalho a mais (Bcc, por exemplo) ou simplesmente derrubaria o envio.
+    Quebras e espaços em sequência viram um espaço.
+    """
+    return " ".join((value or "").split())
+
+
 def build(account: Account, outgoing: Outgoing) -> EmailMessage:
-    """Montar o e-mail. Função pura — aqui não há rede."""
+    """Montar o e-mail. Função pura — aqui não há rede.
+
+    Lança MailError se, mesmo limpo, algum cabeçalho não for aceito.
+    """
     letter = EmailMessage()
-    letter["From"] = formataddr((account.display_name or "", account.email))
-    letter["To"] = outgoing.to
-    letter["Subject"] = outgoing.subject
-    letter["Date"] = formatdate(localtime=False)
-    letter["Message-ID"] = make_msgid(domain=account.email.rsplit("@", 1)[-1])
-    if outgoing.in_reply_to:
-        letter["In-Reply-To"] = outgoing.in_reply_to
-        letter["References"] = outgoing.in_reply_to
-    letter.set_content(outgoing.text)
+    try:
+        letter["From"] = formataddr((_one_line(account.display_name), account.email))
+        letter["To"] = _one_line(outgoing.to)
+        letter["Subject"] = _one_line(outgoing.subject)
+        letter["Date"] = formatdate(localtime=False)
+        letter["Message-ID"] = make_msgid(domain=account.email.rsplit("@", 1)[-1])
+        thread = _one_line(outgoing.in_reply_to)
+        if thread:
+            letter["In-Reply-To"] = thread
+            letter["References"] = thread
+        letter.set_content(outgoing.text)
+    except ValueError as exc:
+        # A biblioteca de e-mail recusa cabeçalhos tortos com ValueError —
+        # sem isto a pessoa veria um erro 500 em vez de uma explicação.
+        raise MailError(
+            "Não foi possível montar a resposta: o assunto ou o endereço tem caracteres inválidos."
+        ) from exc
     return letter
 
 
 def _send(account: Account, letter: EmailMessage) -> None:
     profile = profile_for(account.email)
     password = decrypt_secret(account.secret_ciphertext)
+    # Como na busca: o servidor de envio sai do domínio digitado — nada de endereço interno.
+    guard.ensure_public_host(profile.smtp_host, profile.smtp_port)
     try:
         if profile.smtp_port == 465:
             server = smtplib.SMTP_SSL(
@@ -118,6 +143,10 @@ def _keep_copy(account: Account, letter: EmailMessage) -> None:
     """
     profile = profile_for(account.email)
     if profile.saves_sent:
+        return
+    try:
+        guard.ensure_public_host(profile.imap_host, profile.imap_port)
+    except MailError:
         return
     try:
         client = imaplib.IMAP4_SSL(

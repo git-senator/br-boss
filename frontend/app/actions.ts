@@ -8,6 +8,7 @@ import {
   addAccount,
   addManyAccounts,
   ApiError,
+  changePassword,
   createRule,
   deleteAccount,
   deleteAiKey,
@@ -15,6 +16,7 @@ import {
   errorText,
   ignoreMessage,
   login,
+  logout,
   makeDraft,
   refreshBrief,
   reopenMessage,
@@ -48,12 +50,22 @@ function withParam(path: string, key: string, value: string): string {
 
 /**
  * Para onde voltar após a ação — vem de um campo oculto do formulário.
- * Só endereços nossos: «/…», mas nunca «//site-alheio» — senão um link
- * com o campo adulterado poderia levar a pessoa para qualquer lugar.
+ * Só endereços nossos: «/…», mas nunca «//site-alheio» nem «/\site-alheio»
+ * — o navegador lê a barra invertida como barra, e um link com o campo
+ * adulterado poderia levar a pessoa para qualquer lugar.
  */
 function returnPath(form: FormData, field: string, fallback: string): string {
   const value = String(form.get(field) ?? "");
-  return value.startsWith("/") && !value.startsWith("//") ? value : fallback;
+  return value.startsWith("/") && !/^\/[\\/]/.test(value) ? value : fallback;
+}
+
+/**
+ * O endereço da pessoa é definido pelo nginx na frente do site, no X-Real-IP.
+ * Só ele: o X-Forwarded-For o navegador pode mandar como quiser, e com ele
+ * um script trocaria de «endereço» a cada tentativa e passaria pelo limite.
+ */
+async function clientIp(): Promise<string> {
+  return (await headers()).get("x-real-ip") ?? "";
 }
 
 /**
@@ -76,7 +88,7 @@ export async function loginAction(form: FormData): Promise<void> {
 
   let token: string;
   try {
-    token = (await login(email, password, code)).access_token;
+    token = (await login(email, password, code, await clientIp())).access_token;
   } catch (error) {
     rethrowRedirects(error);
     if (error instanceof ApiError && error.detail === "totp_required") {
@@ -132,14 +144,9 @@ export async function registerAction(form: FormData): Promise<void> {
   if (!email || !password) back("/register", "Informe o e-mail e a senha");
   if (password !== again) back("/register", "As senhas não coincidem");
 
-  // O endereço da pessoa é definido pelo nginx na frente do site; um
-  // X-Forwarded-For forjado pelo navegador é sobrescrito pelo X-Real-IP dele.
-  const incoming = await headers();
-  const clientIp = incoming.get("x-real-ip") ?? incoming.get("x-forwarded-for") ?? "";
-
   let token: string;
   try {
-    token = (await register(email, password, clientIp)).access_token;
+    token = (await register(email, password, await clientIp())).access_token;
   } catch (error) {
     rethrowRedirects(error);
     back("/register", errorText(error));
@@ -151,8 +158,37 @@ export async function registerAction(form: FormData): Promise<void> {
 }
 
 export async function logoutAction(): Promise<void> {
+  // Primeiro o servidor esquece o token, depois o navegador apaga o cookie:
+  // um token copiado antes do «Sair» também deixa de valer.
+  await logout();
   await clearToken();
   redirect("/login");
+}
+
+/** O erro da troca de senha vai num parâmetro próprio: «error» é o da chave de IA, na mesma página. */
+function passwordError(text: string): never {
+  redirect(withParam("/key#senha", "password_error", text));
+}
+
+export async function changePasswordAction(form: FormData): Promise<void> {
+  const current = String(form.get("current") ?? "");
+  const next = String(form.get("password") ?? "");
+  const again = String(form.get("again") ?? "");
+
+  if (!current || !next) passwordError("Informe a senha atual e a nova");
+  if (next !== again) passwordError("As senhas novas não coincidem");
+
+  let token: string;
+  try {
+    token = (await changePassword(current, next)).access_token;
+  } catch (error) {
+    rethrowRedirects(error);
+    passwordError(errorText(error));
+  }
+
+  // As outras sessões caíram; esta segue com o token novo.
+  await setToken(token);
+  redirect("/key?password=1#senha");
 }
 
 export async function addAccountAction(form: FormData): Promise<void> {

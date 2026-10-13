@@ -50,6 +50,11 @@ class Settings(BaseSettings):
     # cota do mês ou o DeepL não respondeu — o tradutor próprio
     # (libretranslate). Vazio — direto o próprio.
     deepl_api_key: str = ""
+    # Quantos caracteres do DeepL por dia cabem a cada pessoa que se cadastrou
+    # sozinha (member). A cota mensal é uma só para o servidor inteiro: sem
+    # este teto, um desconhecido clicando «Traduzir» a esgota em uma tarde.
+    # Passou do teto — traduz o tradutor próprio. A equipe (owner) não tem teto.
+    deepl_member_daily_chars: int = 20000
     # Resumo matinal: a que horas (no TZ) montá-lo e para onde mandá-lo por
     # e-mail. Vazio — não mandar; o resumo fica só na tela «Resumo».
     brief_hour: int = 7

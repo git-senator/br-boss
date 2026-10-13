@@ -268,3 +268,92 @@ async def test_deepl_is_asked_for_brazilian_portuguese(monkeypatch):
 
     assert await translator._deepl(["Hello"]) == ["<pt>Hello</pt>"]
     assert sent["target_lang"] == "PT-BR"
+
+
+# --- teto diário do DeepL para quem se cadastrou sozinho ---
+
+
+@pytest.fixture
+async def member_letters(session):
+    """Uma pessoa cadastrada pelo link (member), com dois e-mails em inglês."""
+    from app.models import Account, User
+
+    person = User(email="ana@example.com", password_hash="x", role="member")
+    session.add(person)
+    await session.flush()
+    box = Account(user_id=person.id, email="ana@uol.com.br", secret_ciphertext=encrypt_secret("p"))
+    session.add(box)
+    await session.flush()
+    letters = [
+        Message(
+            account_id=box.id,
+            provider_message_id=f"en-{n}",
+            sender="anna@supplier.com",
+            subject="Overdue invoice",
+            body_text="Hello! Please pay by Friday.",
+        )
+        for n in (1, 2)
+    ]
+    session.add_all(letters)
+    await session.flush()
+    return person, letters
+
+
+def _as(person) -> dict:
+    from app.security import create_token
+
+    return {"Authorization": f"Bearer {create_token(person)}"}
+
+
+async def test_member_over_the_daily_ceiling_gets_our_own_translator(
+    client, session, member_letters, deepl, libre, monkeypatch
+):
+    """A cota do DeepL é uma só para o servidor. Um desconhecido clicando
+    «Traduzir» sem parar não pode gastá-la — passou do teto, traduz o próprio."""
+    from app import quota
+    from app.models import WorkerState
+
+    person, (first, second) = member_letters
+    size = translator.deepl_chars(first)
+    monkeypatch.setattr(settings, "deepl_member_daily_chars", size + 5)
+
+    one = await client.post(f"/api/messages/{first.id}/translate", headers=_as(person))
+    two = await client.post(f"/api/messages/{second.id}/translate", headers=_as(person))
+
+    assert one.json()["subject_translated"] == "<deepl>Overdue invoice</deepl>"
+    assert two.status_code == 200
+    assert two.json()["subject_translated"] == "<pt>Overdue invoice</pt>", "recebeu tradução"
+    assert len(deepl["calls"]) == 1, "o segundo e-mail não passou pelo DeepL"
+
+    spent = await session.get(WorkerState, f"deepl:chars:{person.id}:{quota.today()}")
+    assert spent is not None and int(spent.value) == size, "o gasto fica no banco, não na memória"
+
+
+async def test_the_team_has_no_deepl_ceiling(auth_client, letter, deepl, libre, monkeypatch):
+    monkeypatch.setattr(settings, "deepl_member_daily_chars", 1)
+
+    response = await auth_client.post(f"/api/messages/{letter.id}/translate")
+
+    assert response.json()["subject_translated"] == "<deepl>Overdue invoice</deepl>"
+
+
+async def test_two_clicks_at_once_keep_the_first_translation(
+    auth_client, session, letter, monkeypatch
+):
+    """Dois pedidos ao mesmo tempo: o que terminou depois não sobrescreve o que já foi salvo."""
+    from sqlalchemy import update
+
+    async def slow(message, use_deepl=True):
+        # Enquanto este pedido traduzia, o outro clique já salvou a dele.
+        await session.execute(
+            update(Message)
+            .where(Message.id == message.id)
+            .values(subject_translated="Primeira", body_translated="Primeira tradução")
+        )
+        return translate_module.Translation(subject="Segunda", body="Segunda tradução")
+
+    monkeypatch.setattr(translator, "translate", slow)
+
+    response = await auth_client.post(f"/api/messages/{letter.id}/translate")
+
+    assert response.json()["body_translated"] == "Primeira tradução"

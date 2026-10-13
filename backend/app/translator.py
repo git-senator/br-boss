@@ -144,13 +144,24 @@ async def _libre(sample: str, texts: list[str]) -> list[str] | None:
     return translated
 
 
-async def translate(message: Message) -> Translation:
+def _texts(message: Message) -> tuple[str, list[tuple[str, bool]], list[str]]:
     body = message.body_text[:LETTER_CHARS]
     parts = pieces(body)
-    texts = [message.subject or " "] + [text for text, wanted in parts if wanted]
+    return body, parts, [message.subject or " "] + [text for text, wanted in parts if wanted]
+
+
+def deepl_chars(message: Message) -> int:
+    """Quantos caracteres este e-mail gasta da cota do DeepL — o que de fato vai para lá."""
+    return sum(len(text) for text in _texts(message)[2])
+
+
+async def translate(message: Message, use_deepl: bool = True) -> Translation:
+    """use_deepl=False — direto o tradutor próprio: a pessoa já gastou o
+    seu teto diário do DeepL (veja DEEPL_MEMBER_DAILY_CHARS)."""
+    body, parts, texts = _texts(message)
 
     translated: list[str] | None = None
-    if settings.deepl_api_key:
+    if settings.deepl_api_key and use_deepl:
         try:
             translated = await _deepl(texts)
         except _DeeplUnavailable as reason:

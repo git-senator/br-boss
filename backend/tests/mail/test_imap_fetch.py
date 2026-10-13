@@ -35,9 +35,11 @@ class FakeImap:
         self.spam = spam or {}
         self.junk_flag = junk_flag
         self.logged_out = False
-        self.fetch_commands: list[str] = []
+        self.fetch_commands: list[tuple[str, str]] = []
         self.opened: list[str] = []
         self.current = self.letters
+        # Tamanho declarado de cada e-mail (RFC822.SIZE). Sem entrada — pequeno.
+        self.sizes: dict[str, int] = {}
 
     def list(self):
         junk = rb'(\HasNoChildren \Junk) "/" "[Gmail]/Spam"'
@@ -59,9 +61,15 @@ class FakeImap:
             start = int(query.split()[1].split(":")[0])
             matching = sorted((uid for uid in self.current if int(uid) >= start), key=int)
             return "OK", [" ".join(matching).encode()]
+        if command == "fetch" and args[-1] == "(RFC822.SIZE)":
+            rows = [
+                f"{n} (UID {uid} RFC822.SIZE {self.sizes.get(uid, 100)})".encode()
+                for n, uid in enumerate(args[0].split(","), start=1)
+            ]
+            return "OK", rows
         if command == "fetch":
             uid = args[0]
-            self.fetch_commands.append(args[-1])
+            self.fetch_commands.append((uid, args[-1]))
             return "OK", [(b"header", self.current[uid])]
         raise AssertionError(f"unexpected command {command}")
 
@@ -149,8 +157,8 @@ async def test_reading_mail_does_not_mark_it_read_in_the_mailbox(source):
     await instance.fetch_since(None)
 
     assert fake.fetch_commands, "os e-mails foram mesmo buscados"
-    assert all("PEEK" in command for command in fake.fetch_commands)
-    assert not any("RFC822" in command for command in fake.fetch_commands)
+    assert all("PEEK" in command for _, command in fake.fetch_commands)
+    assert not any("RFC822" in command for _, command in fake.fetch_commands)
 
 
 async def test_spam_is_fetched_too(source):
@@ -224,3 +232,20 @@ def test_password_login_turned_off_is_detected():
     assert password_login_allowed(gmail) is True
     assert password_login_allowed(uol) is True
     assert password_login_allowed(old_server) is True, "sem LOGINDISABLED, LOGIN vale"
+
+
+async def test_a_huge_letter_is_not_downloaded(source):
+    """Duzentos e-mails de 50 MB numa rodada estouram a memória do worker.
+    O gigante entra só com o cabeçalho e um aviso — e a caixa segue."""
+    from app.mail.imap_source import MAX_MESSAGE_BYTES, TOO_BIG_NOTE
+
+    instance, fake = source({"1": letter("Pequeno"), "2": letter("Gigante")}, spam={})
+    fake.sizes = {"2": MAX_MESSAGE_BYTES + 1}
+
+    messages, cursor = await instance.fetch_since(None)
+
+    assert dict(fake.fetch_commands) == {"1": "(BODY.PEEK[])", "2": "(BODY.PEEK[HEADER])"}
+    big = next(m for m in messages if m.provider_message_id == "2")
+    assert big.subject == "Gigante", "o cabeçalho chegou"
+    assert big.body_text == TOO_BIG_NOTE
+    assert cursor.startswith("inbox=2"), "o cursor anda: o gigante não trava a caixa"

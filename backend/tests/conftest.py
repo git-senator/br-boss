@@ -61,6 +61,26 @@ def anthropic_key(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def fresh_login_attempts():
+    """O contador de erros de login vive na memória do processo. Sem limpá-lo,
+    os erros de um teste somam com os do outro, e um teste qualquer bate no
+    limite por endereço sem ter nada a ver com ele."""
+    from app.ratelimit import attempts
+
+    attempts.clear()
+    yield
+    attempts.clear()
+
+
+@pytest.fixture(autouse=True)
+def public_mail_hosts(monkeypatch):
+    """Nos testes nenhum nome é resolvido de verdade: todo servidor de e-mail
+    «está» num endereço público. Quem testa a própria checagem
+    (tests/mail/test_guard.py) troca a resposta pela que quiser."""
+    monkeypatch.setattr("app.mail.guard._addresses", lambda host, port: ["93.184.215.14"])
+
+
+@pytest.fixture(autouse=True)
 def auth_secret(monkeypatch):
     monkeypatch.setattr(settings, "auth_secret", "chave-de-teste")
 

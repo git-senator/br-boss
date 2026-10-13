@@ -1,7 +1,8 @@
-import { ExternalLink, KeyRound } from "lucide-react";
+import { ExternalLink, KeyRound, Lock } from "lucide-react";
 
-import { removeAiKeyAction, saveAiKeyAction } from "@/app/actions";
+import { changePasswordAction, removeAiKeyAction, saveAiKeyAction } from "@/app/actions";
 import { Nav } from "@/components/nav";
+import { PendingButton } from "@/components/pending-button";
 import { me } from "@/lib/api";
 
 export const dynamic = "force-dynamic";
@@ -16,9 +17,15 @@ const STUDIO = "https://aistudio.google.com/apikey";
 export default async function KeyPage({
   searchParams,
 }: {
-  searchParams: Promise<{ error?: string; saved?: string; removed?: string }>;
+  searchParams: Promise<{
+    error?: string;
+    saved?: string;
+    removed?: string;
+    password?: string;
+    password_error?: string;
+  }>;
 }) {
-  const { error, saved, removed } = await searchParams;
+  const { error, saved, removed, password, password_error: passwordError } = await searchParams;
   const who = await me();
   const hint = who.ai_key_hint;
 
@@ -127,6 +134,59 @@ export default async function KeyPage({
             para aprimorar os próprios modelos. Para e-mails de trabalho, é melhor ativar o
             faturamento no AI Studio — a análise custa uma fração de centavo por e-mail.
           </p>
+        </section>
+
+        {/* Trocar a senha derruba as outras sessões abertas — inclusive uma roubada. */}
+        <section id="senha" className="glass-card mt-5 scroll-mt-24 rounded-2xl p-5">
+          <div className="flex items-center gap-3">
+            <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-xl bg-white/10 text-ink-dim">
+              <Lock className="h-4 w-4" aria-hidden />
+            </span>
+            <div className="min-w-0">
+              <h2 className="font-semibold text-white">Alterar senha</h2>
+              <p className="mt-0.5 text-sm text-ink-dim">
+                Os outros aparelhos saem da conta; este continua conectado.
+              </p>
+            </div>
+          </div>
+
+          <form action={changePasswordAction} className="mt-5 flex flex-col gap-2">
+            <input
+              name="current"
+              type="password"
+              required
+              autoComplete="current-password"
+              placeholder="Senha atual"
+              aria-label="Senha atual"
+              className="field"
+            />
+            <input
+              name="password"
+              type="password"
+              required
+              minLength={10}
+              autoComplete="new-password"
+              placeholder="Nova senha (pelo menos 10 caracteres)"
+              aria-label="Nova senha"
+              className="field"
+            />
+            <input
+              name="again"
+              type="password"
+              required
+              minLength={10}
+              autoComplete="new-password"
+              placeholder="Repita a nova senha"
+              aria-label="Repita a nova senha"
+              className="field"
+            />
+            <PendingButton className="btn-main self-start" pending="Salvando…">
+              Alterar senha
+            </PendingButton>
+          </form>
+
+          {passwordError ? <p className="note-bad mt-3">{passwordError}</p> : null}
+          {password ? <p className="note-ok mt-3">Senha alterada.</p> : null}
         </section>
       </main>
     </div>

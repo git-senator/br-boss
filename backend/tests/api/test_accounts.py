@@ -135,3 +135,77 @@ async def test_service_is_guessed_by_address(auth_client):
     body = (await auth_client.get("/api/accounts/service-for?email=x@yandex.ru")).json()
     assert body["label"] == "Yandex"
     assert body["imap_host"] == "imap.yandex.ru"
+
+
+# --- limites contra quem usaria o formulário para testar senhas alheias ---
+
+
+async def _member(session, email="ana@example.com"):
+    from app.models import User
+    from app.security import create_token
+
+    person = User(email=email, password_hash="x", role="member")
+    session.add(person)
+    await session.flush()
+    return person, {"Authorization": f"Bearer {create_token(person)}"}
+
+
+async def test_someone_elses_mailbox_is_not_revealed(client, mail, session, account):
+    """Procurar a repetida em todas as caixas contaria a um desconhecido que
+    alguém já conectou este endereço aqui. A busca é só entre as dele."""
+    _, headers = await _member(session)
+
+    response = await client.post(
+        "/api/accounts", json={"email": account.email, "password": "p"}, headers=headers
+    )
+
+    assert response.status_code == 201
+    assert mail["checked"] == [account.email], "a senha foi conferida como a de qualquer caixa"
+
+
+async def test_connection_checks_per_hour_are_limited(
+    auth_client, mail, session, user, monkeypatch
+):
+    """Cada caixa conferida é um login de verdade no servidor de e-mail. Sem
+    teto, o formulário vira serviço gratuito de adivinhar senhas."""
+    from app import quota
+    from app.api import accounts as accounts_api
+    from app.models import WorkerState
+
+    monkeypatch.setattr(accounts_api, "CHECKS_PER_HOUR", 3)
+    mail["error"] = MailAuthError(BAD_PASSWORD)
+
+    for n in range(3):
+        response = await auth_client.post(
+            "/api/accounts", json={"email": f"chute{n}@gmail.com", "password": "errada"}
+        )
+        assert response.status_code == 400
+
+    blocked = await auth_client.post(
+        "/api/accounts", json={"email": "chute9@gmail.com", "password": "errada"}
+    )
+
+    assert blocked.status_code == 429
+    assert "Tentativas de conexão demais" in blocked.json()["detail"]
+    assert "chute9@gmail.com" not in mail["checked"], "acabou o teto — nem tentamos conectar"
+    counter = await session.get(WorkerState, f"mailcheck:{user.id}:{quota.this_hour()}")
+    assert counter is not None and counter.value == "3", "o contador fica no banco"
+
+
+async def test_member_has_a_mailbox_ceiling(client, mail, session, monkeypatch):
+    from app.api import accounts as accounts_api
+
+    monkeypatch.setattr(accounts_api, "MEMBER_MAILBOXES", 1)
+    _, headers = await _member(session)
+
+    first = await client.post(
+        "/api/accounts", json={"email": "um@gmail.com", "password": "p"}, headers=headers
+    )
+    second = await client.post(
+        "/api/accounts", json={"email": "dois@gmail.com", "password": "p"}, headers=headers
+    )
+
+    assert first.status_code == 201
+    assert second.status_code == 400
+    assert "máximo" in second.json()["detail"]
+    assert mail["checked"] == ["um@gmail.com"]
