@@ -281,3 +281,31 @@ async def test_each_person_has_their_own_brief(client, world, session, monkeypat
     assert [m["subject"] for m in bob_brief["attention"]] == ["Segredo bob@example.com"]
     stored = list(await session.scalars(select(Brief)))
     assert {row.user_id for row in stored} == {ana.id, bob.id}
+
+
+async def test_draft_history_comes_only_from_own_mailboxes(session, world):
+    """O rascunho usa a conversa anterior com o remetente. Um remetente
+    falsificado não pode puxar o e-mail nem as respostas de outra pessoa."""
+    from app.api.replies import _context
+    from app.models import Reply
+
+    boss, _, boss_letter = world["boss"]
+    ana, _, ana_letter = world["ana"]
+    session.add(
+        Reply(
+            message_id=boss_letter.id,
+            to_address="bank@example.com",
+            subject="Re: cofre",
+            ai_text="A senha do cofre é 1234",
+            status="sent",
+            created_by=boss.id,
+        )
+    )
+    await session.flush()
+
+    earlier, sent = await _context(session, ana_letter, ana)
+    assert earlier == [] and sent == [], "outra pessoa vazou para o rascunho de Ana"
+
+    earlier, sent = await _context(session, boss_letter, boss)
+    assert {m.id for m in earlier} == {world["client"][2].id}, "a equipe compartilha a caixa"
+    assert len(sent) == 1

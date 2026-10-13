@@ -111,7 +111,9 @@ async def _open_replies(session: AsyncSession, message: Message) -> list[Reply]:
     )
 
 
-async def _context(session: AsyncSession, message: Message) -> tuple[list[Message], list[Reply]]:
+async def _context(
+    session: AsyncSession, message: Message, user: User
+) -> tuple[list[Message], list[Reply]]:
     """Conversa anterior com essa pessoa: os e-mails dela e as nossas respostas."""
     earlier = list(
         await session.scalars(
@@ -121,6 +123,9 @@ async def _context(session: AsyncSession, message: Message) -> tuple[list[Messag
                 Message.sender == message.sender,
                 Message.id != message.id,
                 Message.folder.is_distinct_from("spam"),
+                # Só das caixas que essa pessoa vê — senão o rascunho
+                # traria o e-mail de outro usuário para o prompt.
+                visible_accounts(user),
             )
             .order_by(Message.sent_at.desc().nulls_last())
             .limit(HISTORY_LETTERS)
@@ -129,7 +134,13 @@ async def _context(session: AsyncSession, message: Message) -> tuple[list[Messag
     sent = list(
         await session.scalars(
             select(Reply)
-            .where(Reply.to_address == answer_address(message), Reply.status == "sent")
+            .join(Message, Reply.message_id == Message.id)
+            .join(Account)
+            .where(
+                Reply.to_address == answer_address(message),
+                Reply.status == "sent",
+                visible_accounts(user),
+            )
             .order_by(Reply.id.desc())
             .limit(HISTORY_REPLIES)
         )
@@ -152,7 +163,7 @@ async def make_draft(
     if current and not (body and body.regenerate):
         return reply_dict(current)
 
-    earlier, sent = await _context(session, message)
+    earlier, sent = await _context(session, message, user)
     try:
         # O rascunho sai pela chave de quem pediu.
         with keys.using(keys.key_of(user)):
