@@ -67,12 +67,12 @@ function Emblem() {
       />
 
       {/* Chip com terminais */}
-      {[24.5, 28.5, 32.5, 36.5].map((at) => (
+      {[26, 30, 34, 38].map((at) => (
         <g key={at} stroke="#2a2d34" strokeWidth={1.4} strokeLinecap="round">
           <line x1={at} y1={20.5} x2={at} y2={23} />
           <line x1={at} y1={39} x2={at} y2={41.5} />
-          <line x1={20.5} y1={at + 1} x2={23} y2={at + 1} />
-          <line x1={41} y1={at + 1} x2={43.5} y2={at + 1} />
+          <line x1={20.5} y1={at - 1} x2={23} y2={at - 1} />
+          <line x1={41} y1={at - 1} x2={43.5} y2={at - 1} />
         </g>
       ))}
       <rect x={23} y={23} width={18} height={16} rx={2.5} fill="#1d2027" stroke="#e8eaee" strokeWidth={1.2} />
