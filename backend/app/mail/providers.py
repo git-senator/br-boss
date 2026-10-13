@@ -105,6 +105,19 @@ _YAHOO = ProviderProfile(
     ),
 )
 
+_APPLE = ProviderProfile(
+    key="apple",
+    label="Apple",
+    imap_host="imap.mail.me.com",
+    smtp_host="smtp.mail.me.com",
+    smtp_port=587,
+    help_url="https://account.apple.com/account/manage",
+    password_hint=(
+        "Iniciar sessão e segurança → Senhas de app → criar. "
+        "A senha normal do ID Apple não funciona em programas de e-mail."
+    ),
+)
+
 _MAILRU = ProviderProfile(
     key="mailru",
     label="Mail.ru",
@@ -140,6 +153,9 @@ _BY_DOMAIN: dict[str, ProviderProfile] = {
     "terra.com.br": _TERRA,
     "yahoo.com": _YAHOO,
     "yahoo.com.br": _YAHOO,
+    "icloud.com": _APPLE,
+    "me.com": _APPLE,
+    "mac.com": _APPLE,
     "mail.ru": _MAILRU,
     "bk.ru": _MAILRU,
     "inbox.ru": _MAILRU,
