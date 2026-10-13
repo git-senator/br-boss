@@ -310,6 +310,8 @@ export async function translateAction(form: FormData): Promise<void> {
     rethrowRedirects(error);
     back(path, TRANSLATE_ERROR + errorText(error));
   }
+  // Mesmo endereço — sem isto a página ficaria antiga, sem a tradução.
+  revalidatePath("/", "layout");
   redirect(path);
 }
 
@@ -321,6 +323,9 @@ export async function draftAction(form: FormData): Promise<void> {
     rethrowRedirects(error);
     back(path, errorText(error));
   }
+  // O endereço é o mesmo, só muda o #reply — sem isto o navegador só rola a
+  // página e a mostra antiga, sem o rascunho: ele só aparecia na segunda vez.
+  revalidatePath("/", "layout");
   redirect(`${path}#reply`);
 }
 
