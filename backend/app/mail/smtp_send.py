@@ -9,10 +9,12 @@ e References) — para o destinatário ela aparece como resposta, e não como e-
 
 import asyncio
 import imaplib
+import mimetypes
+import re
 import smtplib
 import ssl
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from email.message import EmailMessage
 from email.utils import formataddr, formatdate, make_msgid
 
@@ -47,12 +49,67 @@ AUTH_REFUSED = (
 )
 
 
+# Anexos da resposta. 25 MB é o teto do Gmail e da maioria dos serviços;
+# acima disso o serviço não aceita de qualquer jeito, só que a pessoa
+# descobriria mais tarde.
+MAX_FILES = 10
+MAX_FILES_BYTES = 25 * 1024 * 1024
+FILENAME_LIMIT = 150
+
+_FILENAME_JUNK = re.compile(r'[\x00-\x1f\x7f<>:"|?*]')
+
+
+@dataclass(slots=True)
+class OutgoingFile:
+    filename: str
+    data: bytes
+
+
 @dataclass(slots=True)
 class Outgoing:
     to: str
     subject: str
     text: str
     in_reply_to: str | None = None
+    files: list[OutgoingFile] = field(default_factory=list)
+
+
+def clean_filename(name: str | None) -> str:
+    """Nome do arquivo anexado, adequado para o e-mail.
+
+    O nome vem do navegador e pode ser qualquer coisa: com caminho
+    («C:\\Users\\…\\fatura.pdf» em navegadores antigos), com quebras de
+    linha, com caracteres que o e-mail do destinatário no Windows não salva.
+    Cortamos o caminho, trocamos o lixo, limitamos o tamanho — a extensão
+    é mantida no corte, senão o arquivo não abre para o destinatário.
+    """
+    base = re.split(r"[\\/]", name or "")[-1]
+    base = _FILENAME_JUNK.sub("_", base)
+    base = " ".join(base.split()).strip(" .")
+    if not base:
+        return "arquivo"
+    if len(base) > FILENAME_LIMIT:
+        stem, dot, ext = base.rpartition(".")
+        if dot and stem and len(ext) <= 10:
+            base = stem[: FILENAME_LIMIT - len(ext) - 1].rstrip(" .") + "." + ext
+        else:
+            base = base[:FILENAME_LIMIT]
+    return base
+
+
+def file_type(filename: str) -> tuple[str, str]:
+    """Tipo do arquivo pela extensão. O tipo mandado pelo navegador não
+    usamos: qualquer um pode forjá-lo, e o destinatário vai decidir com o
+    que abrir o arquivo pelo nome de qualquer forma."""
+    guessed, encoding = mimetypes.guess_type(filename)
+    if not guessed or encoding or "/" not in guessed:
+        return "application", "octet-stream"
+    maintype, subtype = guessed.split("/", 1)
+    # .eml e parecidos: pelas regras, um e-mail dentro de outro não pode
+    # ir em base64, e de outro jeito não dá para mandar bytes arbitrários.
+    if maintype in ("message", "multipart"):
+        return "application", "octet-stream"
+    return maintype, subtype
 
 
 def reply_subject(subject: str) -> str:
@@ -92,6 +149,16 @@ def build(account: Account, outgoing: Outgoing) -> EmailMessage:
             letter["In-Reply-To"] = thread
             letter["References"] = thread
         letter.set_content(outgoing.text)
+        # A cópia para «Enviados» é montada a partir deste mesmo e-mail
+        # (_keep_copy), então os anexos vão estar lá também.
+        for item in outgoing.files:
+            maintype, subtype = file_type(item.filename)
+            letter.add_attachment(
+                item.data,
+                maintype=maintype,
+                subtype=subtype,
+                filename=clean_filename(item.filename),
+            )
     except ValueError as exc:
         # A biblioteca de e-mail recusa cabeçalhos tortos com ValueError —
         # sem isto a pessoa veria um erro 500 em vez de uma explicação.

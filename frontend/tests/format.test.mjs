@@ -14,9 +14,11 @@ import {
   describeRule,
   dueGroup,
   fileSize,
+  isOwnPath,
   linkParts,
   moneyLabel,
   priorityTone,
+  replyFilesProblem,
   ruleWantsNumber,
   senderLabel,
   shortLink,
@@ -293,4 +295,20 @@ test("a tradução é para e-mail estrangeiro, não para o português", () => {
   );
   assert.equal(isMostlyPortuguese("12345 — 678"), true, "sem letras não há o que traduzir");
   assert.equal(isMostlyPortuguese("https://example.com/only/link"), true);
+});
+
+test("arquivos da resposta: no máximo dez e no máximo 25 MB juntos", () => {
+  const mb = 1024 * 1024;
+  assert.equal(replyFilesProblem([]), null);
+  assert.equal(replyFilesProblem([{ size: 10 * mb }, { size: 15 * mb }]), null);
+  assert.match(replyFilesProblem([{ size: 20 * mb }, { size: 6 * mb }]), /no máximo 25,0 MB/);
+  assert.match(replyFilesProblem(Array.from({ length: 11 }, () => ({ size: 1 }))), /no máximo 10 arquivos/);
+});
+
+test("só dá para voltar a um endereço próprio", () => {
+  assert.equal(isOwnPath("/messages/5"), true);
+  assert.equal(isOwnPath("/?open=5&category=payments"), true);
+  assert.equal(isOwnPath("//evil.example"), false);
+  assert.equal(isOwnPath("/\\evil.example"), false);
+  assert.equal(isOwnPath("https://evil.example"), false);
 });

@@ -26,15 +26,21 @@ from app.crypto import decrypt_secret
 from app.mail import guard
 from app.mail.base import MailSource, RawAttachment, RawMessage
 from app.mail.errors import (
+    ATTACHMENT_GONE,
+    ATTACHMENT_TOO_BIG,
     BAD_PASSWORD,
     IMAP_DISABLED,
+    LETTER_GONE,
     PASSWORD_LOGIN_OFF,
     MailAuthError,
+    MailError,
+    MailGoneError,
     MailHostError,
+    MailTooBigError,
     unreachable,
 )
 from app.mail.providers import profile_for
-from app.models import Account
+from app.models import Account, Attachment
 
 # Sem «<» dentro da tag: senão um texto com mil «<» soltos faria cada um
 # deles varrer o e-mail inteiro atrás de um «>» — tempo quadrático.
@@ -130,6 +136,13 @@ TOO_BIG_NOTE = (
     "[Este e-mail é grande demais para ser baixado aqui. Abra-o no próprio "
     "serviço de e-mail para ver o conteúdo e os anexos.]"
 )
+# Anexo maior que isto não é entregue: ele passa inteiro pela memória do
+# servidor, e arquivos assim é melhor abrir no próprio e-mail.
+MAX_ATTACHMENT_BYTES = 30 * 1024 * 1024
+# O e-mail de onde tiramos o anexo é baixado inteiro. O base64 aumenta o
+# arquivo em um terço, e ainda há as outras partes — daí a folga acima do
+# teto do anexo.
+MAX_LETTER_FOR_ATTACHMENT = 45 * 1024 * 1024
 # Quanto texto do e-mail passa pela limpeza (_tidy).
 TEXT_LIMIT = 200_000
 # Como os serviços de e-mail chamam a pasta de spam. O jeito certo é perguntar
@@ -354,27 +367,85 @@ def _is_attachment(part: EmailMessage) -> bool:
     return "attachment" in disposition or bool(part.get_filename())
 
 
+def attachment_parts(parsed: EmailMessage) -> list[EmailMessage]:
+    """Partes do e-mail que são anexos — sempre na mesma ordem.
+
+    A ordem aqui é um contrato: a posição do anexo nesta lista fica gravada
+    no banco (Attachment.part_index), e é por ela que o anexo é procurado
+    no e-mail quando alguém pede para baixar. Por isso a lista é montada
+    por uma única função, tanto na leitura quanto no download.
+    """
+    return [
+        part
+        for part in parsed.walk()
+        if part.get_content_maintype() != "multipart" and _is_attachment(part)
+    ]
+
+
+def attachment_name(part: EmailMessage) -> str:
+    return _decode_header(part.get_filename()) or "sem-nome"
+
+
+def attachment_bytes(part: EmailMessage) -> bytes:
+    """Conteúdo do anexo, decodificado do base64 e afins."""
+    if part.is_multipart():
+        # E-mail encaminhado (message/rfc822): dentro não há bytes, há um e-mail.
+        inner = part.get_payload()
+        if isinstance(inner, list) and inner:
+            return inner[0].as_bytes()
+        return b""
+    return part.get_payload(decode=True) or b""
+
+
+def pick_attachment(raw: bytes, index: int | None, filename: str, size: int) -> bytes:
+    """Achar no e-mail bruto o anexo descrito pela linha do banco. Aqui não há rede.
+
+    Primeiro pela posição — mas só se o nome também bater: depois de uma
+    mudança de pasta, o número do e-mail na caixa pode ir parar em outro
+    e-mail, e entregar à pessoa o arquivo de outro com um nome conhecido é
+    pior do que dizer com franqueza «não encontrado». Sem posição (linha
+    mais antiga que a coluna) ou com nome diferente — procuramos pelo nome
+    e, entre os de mesmo nome, pelo tamanho.
+
+    Lança MailGoneError se esse anexo não estiver no e-mail.
+    """
+    parts = attachment_parts(email.message_from_bytes(raw))
+    # O nome no banco é cortado no tamanho da coluna — comparamos cortado igual.
+    limit = Attachment.__table__.c.filename.type.length
+    names = [attachment_name(part)[:limit] for part in parts]
+
+    if index is not None and 0 <= index < len(parts) and names[index] == filename:
+        return attachment_bytes(parts[index])
+
+    same_name = [part for part, name in zip(parts, names, strict=True) if name == filename]
+    sized = [part for part in same_name if _encoded_size(part) == size]
+    if sized:
+        return attachment_bytes(sized[0])
+    if len(same_name) == 1:
+        return attachment_bytes(same_name[0])
+    raise MailGoneError(ATTACHMENT_GONE)
+
+
 def parse_email(raw: bytes, uid: str) -> RawMessage:
     """Desmontar o e-mail bruto. Função pura — aqui não há rede."""
     parsed = email.message_from_bytes(raw)
 
     plain_parts: list[str] = []
     html_parts: list[str] = []
-    attachments: list[RawAttachment] = []
+    attachments = [
+        RawAttachment(
+            filename=attachment_name(part),
+            content_type=part.get_content_type(),
+            size_bytes=_encoded_size(part),
+            fetch=_make_fetch(part),
+        )
+        for part in attachment_parts(parsed)
+    ]
 
     for part in parsed.walk():
-        if part.get_content_maintype() == "multipart":
+        if part.get_content_maintype() == "multipart" or _is_attachment(part):
             continue
-        if _is_attachment(part):
-            attachments.append(
-                RawAttachment(
-                    filename=_decode_header(part.get_filename()) or "sem-nome",
-                    content_type=part.get_content_type(),
-                    size_bytes=_encoded_size(part),
-                    fetch=_make_fetch(part),
-                )
-            )
-        elif part.get_content_type() == "text/plain":
+        if part.get_content_type() == "text/plain":
             plain_parts.append(_part_text(part))
         elif part.get_content_type() == "text/html":
             html_parts.append(_part_text(part))
@@ -409,20 +480,24 @@ def _encoded_size(part: EmailMessage) -> int:
     """Tamanho do anexo sem decodificá-lo.
 
     Decodificar só para contar bytes é duplicar na memória cada anexo de
-    cada e-mail da rodada. Em base64, cada quatro letras são três bytes.
+    cada e-mail da rodada. Em base64, cada quatro letras são três bytes, e o
+    «=» no fim é enchimento, sem bytes por trás. O tamanho precisa ser exato:
+    é por ele que anexos de mesmo nome se distinguem no download.
     """
     raw = part.get_payload(decode=False)
     if not isinstance(raw, str):
         return 0
     if (part.get("Content-Transfer-Encoding") or "").strip().lower() == "base64":
-        return len("".join(raw.split())) * 3 // 4
+        packed = "".join(raw.split())
+        padding = len(packed) - len(packed.rstrip("="))
+        return max(0, len(packed) * 3 // 4 - padding)
     return len(raw)
 
 
 def _make_fetch(part: EmailMessage):
     # Decodificado só quando alguém de fato pede o anexo.
     async def fetch() -> bytes:
-        return part.get_payload(decode=True) or b""
+        return attachment_bytes(part)
 
     return fetch
 
@@ -538,6 +613,68 @@ class ImapSource(MailSource):
                 client.logout()
 
         return await asyncio.to_thread(pull)
+
+    async def fetch_attachment(
+        self, provider_message_id: str, index: int | None, filename: str, size: int
+    ) -> bytes:
+        """Baixar um anexo do e-mail direto da caixa.
+
+        O e-mail é buscado de novo inteiro: o IMAP sabe entregar uma parte
+        só, mas o servidor numera as partes do jeito dele, e confrontar isso
+        com a nossa leitura não é confiável. Pela mesma leitura que montou a
+        lista de anexos — é.
+
+        Lança MailError com um texto para a pessoa: MailGoneError — o e-mail
+        ou o anexo não existe mais, MailTooBigError — grande demais.
+        """
+        # Número do e-mail — "7" na Caixa de entrada ou "spam:7" no spam (_from_folder).
+        folder, _, uid = provider_message_id.rpartition(":")
+        folder = folder or "inbox"
+        if not uid.isdigit():
+            raise MailGoneError(LETTER_GONE)
+
+        def pull() -> bytes:
+            client = self._login()
+            try:
+                if folder == "inbox":
+                    mailbox = "INBOX"
+                elif folder == "spam":
+                    mailbox = _spam_folder(client)
+                else:
+                    mailbox = None
+                if not mailbox:
+                    raise MailGoneError(LETTER_GONE)
+                raw = self._fetch_whole(client, mailbox, uid)
+            finally:
+                _quietly_close(client)
+            data = pick_attachment(raw, index, filename, size)
+            if len(data) > MAX_ATTACHMENT_BYTES:
+                raise MailTooBigError(ATTACHMENT_TOO_BIG)
+            return data
+
+        return await asyncio.to_thread(pull)
+
+    def _fetch_whole(self, client: imaplib.IMAP4_SSL, mailbox: str, uid: str) -> bytes:
+        """O e-mail inteiro pelo número. Só leitura, sem mexer nas marcas."""
+        try:
+            status, _ = client.select(_quoted(mailbox), readonly=True)
+            if status != "OK":
+                raise MailGoneError(LETTER_GONE)
+            # O tamanho vem antes do download: um e-mail de cem megabytes não
+            # deve parar inteiro na memória só para ser recusado.
+            if _sizes(client, [uid.encode()]).get(uid, 0) > MAX_LETTER_FOR_ATTACHMENT:
+                raise MailTooBigError(ATTACHMENT_TOO_BIG)
+            # PEEK — como na busca: baixar um anexo não marca o e-mail como
+            # lido na própria caixa.
+            _, payload = client.uid("fetch", uid, "(BODY.PEEK[])")
+        except (imaplib.IMAP4.error, OSError) as exc:
+            raise MailError(
+                "O serviço de e-mail não entregou o e-mail. Tente de novo daqui a um minuto."
+            ) from exc
+        for item in payload or []:
+            if isinstance(item, tuple) and len(item) > 1 and isinstance(item[1], bytes):
+                return item[1]
+        raise MailGoneError(LETTER_GONE)
 
     def _from_folder(
         self,

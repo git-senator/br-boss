@@ -1,5 +1,7 @@
 fastapi==0.141.1
 uvicorn[standard]==0.37.0
+# Leitura de formulários com arquivos: os anexos da resposta chegam como multipart/form-data.
+python-multipart==0.0.20
 pydantic-settings==2.11.0
 httpx==0.28.1
 sqlalchemy[asyncio]==2.0.44

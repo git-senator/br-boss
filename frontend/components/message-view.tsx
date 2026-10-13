@@ -1,4 +1,4 @@
-import { Archive, Clock, Languages, Paperclip, Sparkles } from "lucide-react";
+import { Archive, Clock, Download, Languages, Paperclip, Sparkles } from "lucide-react";
 
 import { draftAction, ignoreAction, snoozeAction, translateAction } from "@/app/actions";
 import { LetterBody } from "@/components/letter-body";
@@ -6,6 +6,7 @@ import { PendingButton } from "@/components/pending-button";
 import { ReplyPanel } from "@/components/reply-panel";
 import type { MessageFull } from "@/lib/api";
 import {
+  ATTACHMENT_ERROR,
   categoryLabel,
   deadlineLabel,
   deadlineTone,
@@ -186,6 +187,7 @@ export function MessageView({
 }) {
   // Erro de tradução aparece junto ao botão de traduzir; os demais, junto à resposta.
   const translateError = error?.startsWith(TRANSLATE_ERROR) ? error.slice(TRANSLATE_ERROR.length) : null;
+  const attachmentError = error?.startsWith(ATTACHMENT_ERROR) ? error.slice(ATTACHMENT_ERROR.length) : null;
   const foreign = !isMostlyPortuguese(`${message.subject} ${message.body_text}`);
   const subjectRu = message.subject_translated && message.subject_translated !== message.subject ? message.subject_translated : null;
 
@@ -218,17 +220,26 @@ export function MessageView({
       </div>
 
       {message.attachments.length > 0 ? (
-        <ul className="flex flex-wrap gap-2">
-          {message.attachments.map((file) => (
-            <li
-              key={file.id}
-              className="glass-pill flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs text-ink-dim"
-            >
-              <Paperclip className="h-3.5 w-3.5" aria-hidden />
-              {file.filename} · {fileSize(file.size_bytes)}
-            </li>
-          ))}
-        </ul>
+        <div className="space-y-2">
+          {/* Link comum, e não Link: o arquivo é baixado, a página não muda.
+              Os bytes vêm da caixa na hora do clique — não ficam com a gente. */}
+          <ul className="flex flex-wrap gap-2">
+            {message.attachments.map((file) => (
+              <li key={file.id}>
+                <a
+                  href={`/messages/${message.id}/attachments/${file.id}?back=${encodeURIComponent(back)}`}
+                  className="glass-pill spring flex items-center gap-1.5 rounded-xl px-3 py-1.5 text-xs text-ink-dim transition-colors hover:text-white"
+                  title="Baixar da caixa de e-mail"
+                >
+                  <Paperclip className="h-3.5 w-3.5" aria-hidden />
+                  {file.filename} · {fileSize(file.size_bytes)}
+                  <Download className="h-3.5 w-3.5 text-ink-faint" aria-hidden />
+                </a>
+              </li>
+            ))}
+          </ul>
+          {attachmentError ? <p className="text-xs text-alarm">{attachmentError}</p> : null}
+        </div>
       ) : null}
 
       {foreign && !message.body_translated ? (
@@ -253,7 +264,7 @@ export function MessageView({
 
       <LetterBody original={message.body_text} translated={message.body_translated} />
 
-      <ReplyPanel message={message} back={back} error={translateError ? undefined : error} />
+      <ReplyPanel message={message} back={back} error={translateError || attachmentError ? undefined : error} />
     </div>
   );
 }

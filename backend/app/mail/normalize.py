@@ -13,11 +13,32 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.mail.base import RawMessage
-from app.models import Account, Message
+from app.models import Account, Attachment, Message
 
 # Há e-mails de tamanho monstruoso — em geral por causa de assinaturas e citações.
 # Para a triagem o começo basta, e o banco não incha.
 BODY_LIMIT = 100_000
+# Quantos anexos de um e-mail mostramos. Quem monta o e-mail é o remetente:
+# mil partes minúsculas são mil linhas no banco para cada e-mail assim.
+ATTACHMENTS_LIMIT = 50
+
+_FILENAME_LIMIT = Attachment.__table__.c.filename.type.length
+_TYPE_LIMIT = Attachment.__table__.c.content_type.type.length
+
+
+def _attachments(raw: RawMessage) -> list[Attachment]:
+    """Descrições dos anexos. Os arquivos em si não guardamos — eles são
+    baixados da caixa no clique, e part_index diz qual dos anexos do
+    e-mail é o certo."""
+    return [
+        Attachment(
+            filename=item.filename[:_FILENAME_LIMIT],
+            content_type=item.content_type[:_TYPE_LIMIT],
+            size_bytes=item.size_bytes,
+            part_index=index,
+        )
+        for index, item in enumerate(raw.attachments[:ATTACHMENTS_LIMIT])
+    ]
 
 
 # Os tamanhos vêm da própria tabela, para não divergirem do modelo.
@@ -76,6 +97,8 @@ async def store_messages(
         )
         for raw in fresh
     ]
+    for message, raw in zip(stored, fresh, strict=True):
+        message.attachments = _attachments(raw)
     session.add_all(stored)
     await session.flush()
     return stored

@@ -352,6 +352,35 @@ export function ruleWantsNumber(actionKind: string): boolean {
 /** Marca no texto do erro: mostrá-lo junto ao botão de tradução, não junto à resposta. */
 export const TRANSLATE_ERROR = "Tradução: ";
 
+/** O mesmo para o download de anexo: o erro aparece junto à lista de anexos. */
+export const ATTACHMENT_ERROR = "Anexo: ";
+
+/**
+ * Limites dos arquivos na resposta — os mesmos da API (app/mail/smtp_send.py).
+ * Conferimos também no navegador: saber do excesso antes de enviar 25 MB
+ * é melhor do que depois.
+ */
+export const REPLY_MAX_FILES = 10;
+export const REPLY_MAX_BYTES = 25 * 1024 * 1024;
+
+/** O que há de errado com os arquivos escolhidos — ou null, se está tudo certo. */
+export function replyFilesProblem(files: { size: number }[]): string | null {
+  if (files.length > REPLY_MAX_FILES) return `Dá para anexar no máximo ${REPLY_MAX_FILES} arquivos.`;
+  const total = files.reduce((sum, file) => sum + file.size, 0);
+  if (total > REPLY_MAX_BYTES) {
+    return `Os arquivos somam ${fileSize(total)}, e o e-mail aceita no máximo ${fileSize(REPLY_MAX_BYTES)}. Tire algum ou envie por link.`;
+  }
+  return null;
+}
+
+/**
+ * Endereço próprio para voltar: «/…», mas não «//site-alheio» nem
+ * «/\site-alheio» — o navegador lê a barra invertida como barra normal.
+ */
+export function isOwnPath(value: string): boolean {
+  return value.startsWith("/") && !/^\/[\\/]/.test(value);
+}
+
 /**
  * Palavras funcionais frequentes do português. Ficam de fora as que também
  * são palavras inglesas comuns («a», «o», «as», «do», «no», «se») — senão

@@ -1,6 +1,6 @@
 from fastapi import FastAPI
 
-from app.api import accounts, auth, brief, messages, replies, rules, status
+from app.api import accounts, attachments, auth, brief, messages, replies, rules, status
 from app.config import settings
 
 # A documentação da API é um mapa pronto do sistema para quem o estuda.
@@ -17,6 +17,7 @@ app.include_router(accounts.router)
 app.include_router(messages.router)
 app.include_router(rules.router)
 app.include_router(replies.router)
+app.include_router(attachments.router)
 app.include_router(brief.router)
 app.include_router(status.router)
 

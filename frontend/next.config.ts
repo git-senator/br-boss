@@ -34,6 +34,13 @@ const config: NextConfig = {
   // O endereço da API vem do ambiente — ao migrar para o servidor do cliente,
   // muda-se uma linha no .env, e não o código.
   env: { API_URL: process.env.API_URL ?? "http://api:8000" },
+  experimental: {
+    // Os arquivos da resposta passam por uma ação do servidor. Por padrão
+    // ela aceita 1 MB; os arquivos podem somar 25 MB, mais o texto e uma
+    // folga para o empacotamento do formulário. Na frente do site fica o
+    // nginx — o limite dele (client_max_body_size) não pode ser menor.
+    serverActions: { bodySizeLimit: "30mb" },
+  },
   async headers() {
     return [{ source: "/:path*", headers: SECURITY_HEADERS }];
   },

@@ -1,9 +1,10 @@
-import { RefreshCw, Send, Sparkles } from "lucide-react";
+import { Paperclip, RefreshCw, Send, Sparkles } from "lucide-react";
 
 import { draftAction, reopenAction, sendReplyAction } from "@/app/actions";
 import { PendingButton } from "@/components/pending-button";
+import { ReplyFiles } from "@/components/reply-files";
 import type { MessageFull, ReplyRow } from "@/lib/api";
-import { untilLabel, whenLabel } from "@/lib/format";
+import { fileSize, untilLabel, whenLabel } from "@/lib/format";
 
 const FIELD =
   "glass-pill w-full rounded-xl px-3.5 py-2.5 text-xs text-white placeholder:text-white/35 focus:border-link/60! focus:ring-2 focus:ring-link/25 focus:outline-none";
@@ -27,10 +28,24 @@ function SentReply({ reply }: { reply: ReplyRow }) {
       <summary className="cursor-pointer text-xs text-ink">
         <span className="text-ok">✓</span> Resposta enviada {whenLabel(reply.sent_at)} para {reply.to}
         {reply.ai_text ? "" : " · escrita manualmente"}
+        {reply.attachments?.length ? ` · anexos: ${reply.attachments.length}` : ""}
       </summary>
       <pre className="mt-2 font-sans text-xs leading-relaxed break-words whitespace-pre-wrap text-ink-dim">
         {reply.final_text ?? reply.ai_text}
       </pre>
+      {reply.attachments?.length ? (
+        <ul className="mt-2 flex flex-wrap gap-2">
+          {reply.attachments.map((file, index) => (
+            <li
+              key={`${index}-${file.filename}`}
+              className="glass-pill flex items-center gap-1.5 rounded-xl px-3 py-1 text-[11px] text-ink-dim"
+            >
+              <Paperclip className="h-3 w-3" aria-hidden />
+              {file.filename} · {fileSize(file.size)}
+            </li>
+          ))}
+        </ul>
+      ) : null}
     </details>
   );
 }
@@ -125,15 +140,20 @@ export function ReplyPanel({
             </>
           )}
 
-          <textarea
-            id="reply-text"
-            name="text"
-            required
-            rows={open ? Math.min(16, Math.max(5, text.split("\n").length + 2)) : 3}
-            defaultValue={text}
-            placeholder="Escreva sua resposta ou clique em “Gerar” para a IA preparar um rascunho"
-            className={`${FIELD} leading-relaxed`}
-          />
+          <ReplyFiles
+            buttonClassName={QUIET}
+            lost={open?.status === "failed" ? (open.attachments ?? []).map((file) => file.filename) : []}
+          >
+            <textarea
+              id="reply-text"
+              name="text"
+              required
+              rows={open ? Math.min(16, Math.max(5, text.split("\n").length + 2)) : 3}
+              defaultValue={text}
+              placeholder="Escreva sua resposta ou clique em “Gerar” para a IA preparar um rascunho"
+              className={`${FIELD} block leading-relaxed`}
+            />
+          </ReplyFiles>
 
           {open?.note ? <p className="text-xs text-watch">{open.note}</p> : null}
           {open && /\[[^\]]+\]/.test(text) ? (

@@ -47,6 +47,8 @@ export type ReplyRow = {
   language: string;
   note: string;
   error: string | null;
+  /** O que foi anexado — só nomes e tamanhos; os arquivos em si não ficam com a gente. */
+  attachments: { filename: string; size: number }[];
   created_at: string;
   sent_at: string | null;
 };
@@ -102,10 +104,13 @@ export function errorText(error: unknown): string {
 
 async function request<T>(path: string, init: RequestInit = {}): Promise<T> {
   const token = await getToken();
+  // Num formulário com arquivos, o tipo e o separador das partes são
+  // definidos pelo próprio fetch — um Content-Type nosso os apagaria.
+  const json = !(init.body instanceof FormData);
   const response = await fetch(`${API_URL}${path}`, {
     ...init,
     headers: {
-      "Content-Type": "application/json",
+      ...(json ? { "Content-Type": "application/json" } : {}),
       ...(token ? { Authorization: `Bearer ${token}` } : {}),
       ...init.headers,
     },
@@ -360,11 +365,40 @@ export async function makeDraft(id: number, regenerate = false): Promise<ReplyRo
   });
 }
 
+/**
+ * Enviar a resposta. Sempre como formulário (multipart): os mesmos campos
+ * de antes, mais os arquivos anexados no campo files. Um caminho só, com
+ * arquivos ou sem — menos lugares onde algo pode divergir.
+ */
 export async function sendReply(
   id: number,
   reply: { reply_id: number | null; text: string; to: string; subject: string },
+  files: File[] = [],
 ): Promise<ReplyRow> {
-  return request(`/api/messages/${id}/send`, { method: "POST", body: JSON.stringify(reply) });
+  const body = new FormData();
+  body.set("reply_id", reply.reply_id ? String(reply.reply_id) : "");
+  body.set("text", reply.text);
+  body.set("to", reply.to);
+  body.set("subject", reply.subject);
+  for (const file of files) body.append("files", file, file.name);
+  return request(`/api/messages/${id}/send`, { method: "POST", body });
+}
+
+/**
+ * Anexo do e-mail — a resposta crua da API, para repassar os bytes ao
+ * navegador em fluxo. Por fora de request(): ela lê a resposta inteira como
+ * JSON e, no 401, manda para a página de login; aqui quem decide é a rota
+ * de download.
+ */
+export async function fetchAttachment(
+  messageId: number,
+  attachmentId: number,
+  token: string,
+): Promise<Response> {
+  return fetch(`${API_URL}/api/messages/${messageId}/attachments/${attachmentId}`, {
+    headers: { Authorization: `Bearer ${token}` },
+    cache: "no-store",
+  });
 }
 
 export async function ignoreMessage(id: number): Promise<void> {

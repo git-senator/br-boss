@@ -14,7 +14,7 @@ from sqlalchemy import (
     func,
     text,
 )
-from sqlalchemy.dialects.postgresql import ARRAY
+from sqlalchemy.dialects.postgresql import ARRAY, JSONB
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
 # Os e-mails chegam de fusos horários diferentes — do Brasil, de Dubai, de
@@ -150,7 +150,9 @@ class Message(Base):
     created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
 
     account: Mapped[Account] = relationship(back_populates="messages")
-    attachments: Mapped[list["Attachment"]] = relationship(back_populates="message")
+    attachments: Mapped[list["Attachment"]] = relationship(
+        back_populates="message", order_by="Attachment.id"
+    )
     replies: Mapped[list["Reply"]] = relationship(
         back_populates="message", order_by="Reply.id"
     )
@@ -201,6 +203,13 @@ class Reply(Base):
     error: Mapped[str | None] = mapped_column(Text, default=None)
     # Message-ID do e-mail enviado: é por ele que a resposta do outro lado entra na conversa.
     sent_message_id: Mapped[str | None] = mapped_column(String(255), default=None)
+    # O que foi anexado: [{"filename": ..., "size": ...}]. Só nomes e
+    # tamanhos — para o histórico. Os arquivos não ficam com a gente: foram
+    # com o e-mail, e a cópia está em «Enviados» da caixa. Se não foi, eles
+    # são anexados de novo.
+    attachments: Mapped[list[dict]] = mapped_column(
+        JSONB, default=list, server_default=text("'[]'::jsonb")
+    )
     created_by: Mapped[int] = mapped_column(ForeignKey("users.id"))
     sent_by: Mapped[int | None] = mapped_column(ForeignKey("users.id"), default=None)
     created_at: Mapped[datetime] = mapped_column(Timestamp, server_default=func.now())
@@ -232,6 +241,11 @@ class Brief(Base):
 
 
 class Attachment(Base):
+    """Anexo de um e-mail — só a descrição. Os bytes ficam na caixa
+    e são buscados de lá no clique (app.api.attachments): guardar arquivos
+    dos outros é responder por eles, e eles ocupariam mais espaço do que
+    todo o resto do banco."""
+
     __tablename__ = "attachments"
 
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -239,7 +253,14 @@ class Attachment(Base):
     filename: Mapped[str] = mapped_column(String(500))
     content_type: Mapped[str] = mapped_column(String(120), default="")
     size_bytes: Mapped[int] = mapped_column(default=0)
-    s3_key: Mapped[str] = mapped_column(String(500))
+    # Posição entre os anexos do e-mail — na ordem em que a leitura os lista
+    # (imap_source.attachment_parts). É por ela que o anexo é achado no
+    # e-mail no download. Vazio — linha mais antiga que esta coluna: aí
+    # procuramos pelo nome e pelo tamanho.
+    part_index: Mapped[int | None] = mapped_column(default=None)
+    # Pensada para uma cópia num armazenamento de arquivos. Não fazemos
+    # cópias; a coluna ficou vazia, caso um dia seja necessária.
+    s3_key: Mapped[str | None] = mapped_column(String(500), default=None)
 
     message: Mapped[Message] = relationship(back_populates="attachments")
 

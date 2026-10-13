@@ -9,14 +9,18 @@ REMIND ME. DELEGATE ainda não existe: não há para quem delegar, o sistema
 tem dois acessos, e os dois têm permissão total.
 """
 
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from email.utils import parseaddr
 
-from fastapi import APIRouter, Depends, HTTPException, status
-from pydantic import BaseModel, Field
+from fastapi import APIRouter, Depends, HTTPException, Request, status
+from fastapi.exceptions import RequestValidationError
+from pydantic import BaseModel, Field, ValidationError
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
+from starlette.datastructures import UploadFile
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from app.ai.draft import draft_reply
 from app.ai import keys
@@ -50,6 +54,95 @@ class SendRequest(BaseModel):
     subject: str = Field(default="", max_length=1000)
 
 
+@dataclass(slots=True)
+class Upload:
+    files: list[smtp_send.OutgoingFile] = field(default_factory=list)
+    # (código, texto) da recusa por causa dos arquivos. Não recusamos na hora,
+    # só depois de achar o rascunho: a edição do texto precisa ser salva
+    # também nesse caso.
+    problem: tuple[int, str] | None = None
+
+
+TOO_MANY_FILES = f"Dá para anexar no máximo {smtp_send.MAX_FILES} arquivos."
+FILES_TOO_BIG = (
+    f"Os arquivos somam mais de {smtp_send.MAX_FILES_BYTES // (1024 * 1024)} MB — "
+    "o serviço de e-mail não aceita uma mensagem assim. Envie-os por link ou em partes."
+)
+# Além dos arquivos, a requisição traz o texto e os campos internos do formulário.
+_FORM_OVERHEAD = 1024 * 1024
+
+
+def _field(form, name: str) -> str:
+    value = form.get(name)
+    return value if isinstance(value, str) else ""
+
+
+async def _read_files(items: list[UploadFile]) -> Upload:
+    """Ler os arquivos anexados para a memória, respeitando os limites.
+
+    Mesmo com o campo de arquivos vazio, o navegador manda uma parte sem
+    nome e sem conteúdo. Essas partes são ignoradas.
+    """
+    chosen = [item for item in items if item.filename or item.size]
+    if len(chosen) > smtp_send.MAX_FILES:
+        return Upload(problem=(status.HTTP_422_UNPROCESSABLE_ENTITY, TOO_MANY_FILES))
+    upload = Upload()
+    total = 0
+    for item in chosen:
+        # Lemos um byte a mais que o restante: assim o excesso aparece,
+        # e o que sobra não entra na memória.
+        data = await item.read(smtp_send.MAX_FILES_BYTES - total + 1)
+        total += len(data)
+        if total > smtp_send.MAX_FILES_BYTES:
+            return Upload(problem=(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, FILES_TOO_BIG))
+        upload.files.append(
+            smtp_send.OutgoingFile(filename=smtp_send.clean_filename(item.filename), data=data)
+        )
+    return upload
+
+
+async def _send_input(request: Request) -> tuple[SendRequest, Upload]:
+    """Campos da resposta e arquivos anexados — de um JSON ou de um formulário com arquivos."""
+    kind = request.headers.get("content-type", "").lower()
+    upload = Upload()
+    if kind.startswith("multipart/form-data"):
+        length = request.headers.get("content-length", "")
+        # O excesso evidente é barrado antes da leitura: não faz sentido
+        # receber 300 MB para depois dizer «é demais».
+        if length.isdigit() and int(length) > smtp_send.MAX_FILES_BYTES + _FORM_OVERHEAD:
+            raise HTTPException(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, FILES_TOO_BIG)
+        try:
+            # O teto de partes protege o leitor do formulário; a recusa clara
+            # «no máximo dez arquivos» vem de _read_files.
+            async with request.form(
+                max_files=smtp_send.MAX_FILES * 5, max_fields=20
+            ) as form:
+                fields = {
+                    "reply_id": _field(form, "reply_id") or None,
+                    "text": _field(form, "text"),
+                    "to": _field(form, "to"),
+                    "subject": _field(form, "subject"),
+                }
+                items = [item for item in form.getlist("files") if isinstance(item, UploadFile)]
+                upload = await _read_files(items)
+        except StarletteHTTPException as exc:
+            raise HTTPException(
+                status.HTTP_400_BAD_REQUEST,
+                "Não foi possível receber os arquivos anexados. Tente de novo.",
+            ) from exc
+    else:
+        try:
+            fields = await request.json()
+        except ValueError as exc:
+            raise RequestValidationError(
+                [{"type": "json_invalid", "loc": ("body",), "msg": "JSON inválido", "input": None}]
+            ) from exc
+    try:
+        return SendRequest.model_validate(fields), upload
+    except ValidationError as exc:
+        raise RequestValidationError(exc.errors(include_url=False)) from exc
+
+
 class SnoozeRequest(BaseModel):
     hours: int = Field(ge=1, le=24 * 60)
 
@@ -65,6 +158,7 @@ def reply_dict(reply: Reply) -> dict:
         "language": reply.language,
         "note": reply.note,
         "error": reply.error,
+        "attachments": reply.attachments or [],
         "created_at": reply.created_at,
         "sent_at": reply.sent_at,
     }
@@ -197,17 +291,21 @@ async def make_draft(
 @router.post("/{message_id}/send")
 async def send_reply(
     message_id: int,
-    body: SendRequest,
+    request: Request,
     session: AsyncSession = Depends(get_session),
     user: User = Depends(current_user),
 ) -> dict:
     """Enviar a resposta — exatamente o texto que a pessoa vê no campo.
+
+    Aceita JSON (como antes) ou multipart/form-data com os mesmos campos
+    e os arquivos no campo files — quando há algo anexado à resposta.
 
     A linha da resposta fica travada durante o envio. Senão um clique duplo
     em «Enviar» (ou dois donos no mesmo segundo) mandaria o mesmo e-mail
     duas vezes: a segunda requisição espera e vê que já foi enviado.
     """
     message = await _message(message_id, session, user)
+    body, upload = await _send_input(request)
     if body.reply_id is None:
         # Resposta própria, sem rascunho da IA. No histórico ela é igual,
         # só que com ai_text vazio: fica claro que o modelo não participou.
@@ -238,21 +336,32 @@ async def send_reply(
     if not text:
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "Não dá para enviar uma resposta vazia")
     to = _valid_address(body.to)
-    if to is None:
+    if to is None or upload.problem:
         # A edição do texto é salva mesmo na recusa: a página vai abrir de
         # novo, e a pessoa vai ver o texto dela, não o rascunho original da IA.
         reply.final_text = text
         await session.commit()
+        if upload.problem:
+            raise HTTPException(*upload.problem)
         raise HTTPException(status.HTTP_422_UNPROCESSABLE_ENTITY, "O endereço do destinatário não parece um e-mail")
     subject = body.subject.strip() or reply.subject
 
     reply.to_address = to
     reply.subject = subject
     reply.final_text = text
+    # Para o histórico — o que foi anexado. Gravamos antes do envio: se o
+    # serviço recusar, a pessoa vê quais arquivos precisa anexar de novo.
+    reply.attachments = [{"filename": f.filename, "size": len(f.data)} for f in upload.files]
     try:
         sent_id = await smtp_send.send(
             message.account,
-            smtp_send.Outgoing(to=to, subject=subject, text=text, in_reply_to=message.thread_id),
+            smtp_send.Outgoing(
+                to=to,
+                subject=subject,
+                text=text,
+                in_reply_to=message.thread_id,
+                files=upload.files,
+            ),
         )
     except MailError as exc:
         # O texto não se perde: a resposta fica no histórico com status

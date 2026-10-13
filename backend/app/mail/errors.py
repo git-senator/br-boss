@@ -47,3 +47,27 @@ def unreachable(host: str) -> str:
         f"Não foi possível conectar ao servidor {host}. Confira o endereço do servidor — "
         "em e-mails com domínio próprio ele pode ser diferente do padrão."
     )
+
+
+class MailGoneError(MailError):
+    """O e-mail ou o anexo não está mais onde estava."""
+
+
+class MailTooBigError(MailError):
+    """O e-mail ou o arquivo é maior do que estamos dispostos a passar por nós."""
+
+
+LETTER_GONE = (
+    "Este e-mail não está mais na caixa: foi apagado ou movido para outra "
+    "pasta. Abra-o direto no provedor de e-mail."
+)
+
+ATTACHMENT_GONE = (
+    "O anexo não foi encontrado no e-mail no servidor. Abra o e-mail direto "
+    "no provedor de e-mail."
+)
+
+ATTACHMENT_TOO_BIG = (
+    "O anexo é grande demais para baixar por aqui. Abra o e-mail direto "
+    "no provedor de e-mail."
+)

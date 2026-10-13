@@ -29,7 +29,7 @@ import {
   setAiKey,
   setRuleActive,
 } from "@/lib/api";
-import { TRANSLATE_ERROR } from "@/lib/format";
+import { replyFilesProblem, TRANSLATE_ERROR } from "@/lib/format";
 import { clearToken, setToken } from "@/lib/session";
 
 /**
@@ -332,13 +332,25 @@ export async function draftAction(form: FormData): Promise<void> {
 export async function sendReplyAction(form: FormData): Promise<void> {
   const path = letterPath(form);
   const replyId = Number(form.get("reply_id"));
+  // Mesmo com o campo de arquivos vazio, o navegador manda um arquivo sem
+  // nome e sem bytes. Esse «arquivo» não é anexado.
+  const files = form
+    .getAll("files")
+    .filter((item): item is File => item instanceof File && (item.name !== "" || item.size > 0));
+  // O navegador já conferiu isso, mas o formulário pode ter vindo sem JavaScript.
+  const problem = replyFilesProblem(files);
+  if (problem) back(`${path}#reply`, problem);
   try {
-    await sendReply(Number(form.get("message_id")), {
-      reply_id: replyId || null,
-      text: String(form.get("text") ?? ""),
-      to: String(form.get("to") ?? "").trim(),
-      subject: String(form.get("subject") ?? "").trim(),
-    });
+    await sendReply(
+      Number(form.get("message_id")),
+      {
+        reply_id: replyId || null,
+        text: String(form.get("text") ?? ""),
+        to: String(form.get("to") ?? "").trim(),
+        subject: String(form.get("subject") ?? "").trim(),
+      },
+      files,
+    );
   } catch (error) {
     rethrowRedirects(error);
     back(`${path}#reply`, errorText(error));

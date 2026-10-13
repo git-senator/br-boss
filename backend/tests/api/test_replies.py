@@ -315,3 +315,205 @@ def test_draft_prompt_carries_history_in_tags():
     assert "<nossas_respostas_anteriores>\nResposta antiga" in text
     assert "Data: data desconhecida" in text
 
+
+# --- arquivos na resposta ---
+
+
+def form(**fields) -> dict:
+    """Campos do formulário de resposta — como o servidor Next os manda junto com os arquivos."""
+    return {"reply_id": "", "text": "Segue o contrato.", "to": "ana@fornecedor.com.br", "subject": ""} | fields
+
+
+async def test_files_go_with_the_reply_and_into_the_journal(auth_client, session, letter, mailer):
+    response = await auth_client.post(
+        f"/api/messages/{letter.id}/send",
+        data=form(),
+        files=[
+            ("files", ("contrato.pdf", b"%PDF-1.4 contrato", "application/pdf")),
+            ("files", ("reunião.jpg", b"\xff\xd8\xff jpeg", "image/jpeg")),
+        ],
+    )
+
+    assert response.status_code == 200, response.text
+    sent = mailer["sent"][0]
+    assert sent.text == "Segue o contrato."
+    assert [(f.filename, f.data) for f in sent.files] == [
+        ("contrato.pdf", b"%PDF-1.4 contrato"),
+        ("reunião.jpg", b"\xff\xd8\xff jpeg"),
+    ]
+    # No histórico — só nomes e tamanhos; os arquivos em si não ficam com a gente.
+    assert response.json()["attachments"] == [
+        {"filename": "contrato.pdf", "size": 17},
+        {"filename": "reunião.jpg", "size": 8},
+    ]
+    stored = (await session.scalars(select(Reply))).one()
+    assert stored.status == "sent"
+    assert [item["filename"] for item in stored.attachments] == ["contrato.pdf", "reunião.jpg"]
+
+
+async def test_form_without_files_works_like_json(auth_client, session, letter, model, mailer):
+    reply = await draft(auth_client, letter.id)
+
+    response = await auth_client.post(
+        f"/api/messages/{letter.id}/send",
+        data=form(reply_id=str(reply["id"]), text="Sim, amanhã."),
+        files=[("unused", ("", b""))],
+    )
+
+    assert response.status_code == 200, response.text
+    assert mailer["sent"][0].files == []
+    assert response.json()["id"] == reply["id"]
+    assert response.json()["attachments"] == []
+
+
+async def test_file_names_from_the_browser_are_cleaned(auth_client, letter, mailer):
+    response = await auth_client.post(
+        f"/api/messages/{letter.id}/send",
+        data=form(),
+        files=[("files", (r"C:\Users\boss\..\orçamento.pdf", b"%PDF", "application/pdf"))],
+    )
+
+    assert response.status_code == 200, response.text
+    assert mailer["sent"][0].files[0].filename == "orçamento.pdf"
+
+
+async def test_too_many_files_are_refused_and_the_text_is_kept(auth_client, session, letter, model, mailer):
+    reply = await draft(auth_client, letter.id)
+
+    response = await auth_client.post(
+        f"/api/messages/{letter.id}/send",
+        data=form(reply_id=str(reply["id"]), text="Meu texto"),
+        files=[("files", (f"{n}.txt", b"x", "text/plain")) for n in range(11)],
+    )
+
+    assert response.status_code == 422
+    assert "no máximo 10" in response.json()["detail"]
+    assert mailer["sent"] == []
+    stored = await session.get(Reply, reply["id"])
+    await session.refresh(stored)
+    assert stored.final_text == "Meu texto", "a edição não se perdeu"
+    assert stored.status == "draft"
+
+
+async def test_too_heavy_files_are_refused(auth_client, letter, mailer, monkeypatch):
+    monkeypatch.setattr("app.mail.smtp_send.MAX_FILES_BYTES", 10)
+
+    response = await auth_client.post(
+        f"/api/messages/{letter.id}/send",
+        data=form(),
+        files=[("files", ("a.bin", b"123456", None)), ("files", ("b.bin", b"789012", None))],
+    )
+
+    assert response.status_code == 413
+    assert "MB" in response.json()["detail"]
+    assert mailer["sent"] == []
+
+
+async def test_an_obviously_huge_upload_is_refused_before_reading(auth_client, letter, mailer):
+    response = await auth_client.post(
+        f"/api/messages/{letter.id}/send",
+        content=b"--x--\r\n",
+        headers={
+            "Content-Type": "multipart/form-data; boundary=x",
+            "Content-Length": str(300 * 1024 * 1024),
+        },
+    )
+    assert response.status_code == 413
+    assert mailer["sent"] == []
+
+
+async def test_failed_send_remembers_which_files_to_attach_again(auth_client, session, letter, mailer):
+    mailer["error"] = MailAuthError("O provedor de e-mail não permitiu o envio")
+
+    response = await auth_client.post(
+        f"/api/messages/{letter.id}/send",
+        data=form(),
+        files=[("files", ("contrato.pdf", b"%PDF", "application/pdf"))],
+    )
+
+    assert response.status_code == 502
+    stored = (await session.scalars(select(Reply))).one()
+    await session.refresh(stored)
+    assert stored.status == "failed"
+    assert stored.attachments == [{"filename": "contrato.pdf", "size": 4}]
+
+
+def test_built_letter_carries_the_files(account):
+    """Os arquivos vão como anexos de verdade: com o tipo pela extensão e um
+    nome que sobrevive até à acentuação. A cópia em «Enviados» é montada
+    a partir deste mesmo e-mail."""
+    from email import message_from_bytes
+
+    from app.mail.smtp_send import OutgoingFile
+
+    letter = build(
+        account,
+        Outgoing(
+            to="ana@x.com",
+            subject="Re: Oi",
+            text="Segue.",
+            files=[
+                OutgoingFile("Orçamento nº5.pdf", b"%PDF-1.4"),
+                OutgoingFile("notes.txt", "observação".encode()),
+                OutgoingFile("x.weird", b"\x00\x01"),
+            ],
+        ),
+    )
+
+    parsed = message_from_bytes(letter.as_bytes())
+    assert parsed.get_content_type() == "multipart/mixed"
+    files = [
+        (part.get_content_type(), part.get_filename(), part.get_payload(decode=True))
+        for part in parsed.walk()
+        if part.get_content_disposition() == "attachment"
+    ]
+    assert files == [
+        ("application/pdf", "Orçamento nº5.pdf", b"%PDF-1.4"),
+        ("text/plain", "notes.txt", "observação".encode()),
+        ("application/octet-stream", "x.weird", b"\x00\x01"),
+    ]
+    assert "Segue." in parse_email(letter.as_bytes(), uid="1").body_text
+
+
+def test_sent_copy_contains_the_files(account, monkeypatch):
+    """Onde o serviço não guarda a cópia em «Enviados» sozinho, quem guarda
+    somos nós — e os anexos também precisam estar nela."""
+    from dataclasses import replace
+
+    from app.mail import smtp_send
+    from app.mail.providers import profile_for
+    from app.mail.smtp_send import OutgoingFile
+
+    appended = []
+
+    class FakeImap:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def login(self, *args):
+            return "OK", []
+
+        def list(self):
+            return "OK", [rb'(\HasNoChildren \Sent) "/" "Sent"']
+
+        def append(self, mailbox, flags, when, data):
+            appended.append(data)
+            return "OK", []
+
+        def logout(self):
+            pass
+
+    # Serviço que não guarda a cópia sozinho.
+    profile = replace(profile_for(account.email), saves_sent=False)
+    monkeypatch.setattr(smtp_send, "profile_for", lambda email: profile)
+    monkeypatch.setattr(smtp_send.imaplib, "IMAP4_SSL", FakeImap)
+    letter = build(
+        account,
+        Outgoing(to="ana@x.com", subject="Re", text="t", files=[OutgoingFile("a.pdf", b"%PDF-xyz")]),
+    )
+
+    smtp_send._keep_copy(account, letter)
+
+    assert len(appended) == 1
+    copy = parse_email(appended[0], uid="1")
+    assert [a.filename for a in copy.attachments] == ["a.pdf"]
