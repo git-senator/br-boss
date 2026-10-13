@@ -24,7 +24,14 @@ from html import unescape
 
 from app.crypto import decrypt_secret
 from app.mail.base import MailSource, RawAttachment, RawMessage
-from app.mail.errors import BAD_PASSWORD, IMAP_DISABLED, MailAuthError, MailHostError, unreachable
+from app.mail.errors import (
+    BAD_PASSWORD,
+    IMAP_DISABLED,
+    PASSWORD_LOGIN_OFF,
+    MailAuthError,
+    MailHostError,
+    unreachable,
+)
 from app.mail.providers import profile_for
 from app.models import Account
 
@@ -376,6 +383,12 @@ def _parse_date(value: str | None):
 _TLS = ssl.create_default_context()
 
 
+def password_login_allowed(capabilities) -> bool:
+    """Aceita login por senha? Não, se o servidor diz LOGINDISABLED e não oferece AUTH=PLAIN."""
+    caps = {str(c.decode() if isinstance(c, bytes) else c).upper() for c in capabilities}
+    return "LOGINDISABLED" not in caps or "AUTH=PLAIN" in caps
+
+
 class ImapSource(MailSource):
     def __init__(self, account: Account) -> None:
         self.account = account
@@ -396,6 +409,12 @@ class ImapSource(MailSource):
         except OSError as exc:
             # aqui caem tanto «host inexistente» quanto timeout e conexão recusada
             raise MailHostError(unreachable(self.host)) from exc
+
+    # O servidor só aceita login pela conta (OAuth), não por senha:
+    # dizer isso em vez de «senha errada», que levaria a pessoa a tentar de novo.
+        if not password_login_allowed(getattr(client, "capabilities", ())):
+            _quietly_close(client)
+            raise self._auth_error(PASSWORD_LOGIN_OFF)
 
         try:
             client.login(self.account.email, decrypt_secret(self.account.secret_ciphertext))

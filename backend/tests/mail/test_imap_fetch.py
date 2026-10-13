@@ -209,3 +209,18 @@ async def test_a_mailbox_without_spam_folder_still_works(source):
 
     assert [m.subject for m in messages] == ["a"]
     assert cursor.startswith("inbox=")
+
+
+def test_password_login_turned_off_is_detected():
+    """Outlook/Hotmail: o servidor anuncia LOGINDISABLED e só AUTH=XOAUTH2."""
+    from app.mail.imap_source import password_login_allowed
+
+    microsoft = ("IMAP4REV1", "AUTH=XOAUTH2", "LOGINDISABLED", "SASL-IR")
+    gmail = ("IMAP4REV1", "AUTH=XOAUTH2", "AUTH=PLAIN", "AUTH=PLAIN-CLIENTTOKEN")
+    uol = ("IMAP4REV1", "SASL-IR", "AUTH=PLAIN")
+    old_server = ("IMAP4REV1", "IDLE")
+
+    assert password_login_allowed(microsoft) is False
+    assert password_login_allowed(gmail) is True
+    assert password_login_allowed(uol) is True
+    assert password_login_allowed(old_server) is True, "sem LOGINDISABLED, LOGIN vale"

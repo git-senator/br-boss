@@ -45,10 +45,12 @@ _MICROSOFT = ProviderProfile(
     smtp_host="smtp.office365.com",
     smtp_port=587,
     saves_sent=True,
-    help_url="https://account.microsoft.com/security",
+    help_url="https://outlook.live.com/mail/0/options/mail/forwarding",
+    # A Microsoft desligou o acesso por senha (IMAP) no Outlook e no Hotmail:
+    # o servidor só aceita OAuth. Senha de app não resolve.
     password_hint=(
-        "Segurança → Opções de segurança avançadas → Senhas de app. "
-        "É preciso ter a verificação em duas etapas ativada."
+        "A Microsoft não aceita mais conexão por senha. Ative o encaminhamento "
+        "automático do Outlook para um Gmail e conecte o Gmail."
     ),
 )
 
@@ -69,7 +71,7 @@ _BOL = ProviderProfile(
     key="bol",
     label="BOL",
     imap_host="imap.bol.com.br",
-    smtp_host="smtp.bol.com.br",
+    smtp_host="smtps.bol.com.br",
     smtp_port=587,
     help_url="https://email.bol.uol.com.br",
     password_hint=(

@@ -35,6 +35,13 @@ IMAP_DISABLED = (
 )
 
 
+PASSWORD_LOGIN_OFF = (
+    "Este provedor não aceita mais conexão por senha — só pelo login da conta "
+    "(a Microsoft desligou isso no Outlook e no Hotmail). Por enquanto, ative o "
+    "encaminhamento automático dos e-mails para um Gmail e conecte o Gmail aqui."
+)
+
+
 def unreachable(host: str) -> str:
     return (
         f"Não foi possível conectar ao servidor {host}. Confira o endereço do servidor — "
